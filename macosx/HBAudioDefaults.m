@@ -124,6 +124,24 @@
     _allowMP3Passthru = allowMP3Passthru;
 }
 
+- (void)setAllowVorbisPassthru:(BOOL)allowVorbisPassthru
+{
+    if (allowVorbisPassthru != _allowVorbisPassthru)
+    {
+        [[self.undo prepareWithInvocationTarget:self] setAllowVorbisPassthru:_allowVorbisPassthru];
+    }
+    _allowVorbisPassthru = allowVorbisPassthru;
+}
+
+- (void)setAllowOpusPassthru:(BOOL)allowOpusPassthru
+{
+    if (allowOpusPassthru != _allowOpusPassthru)
+    {
+        [[self.undo prepareWithInvocationTarget:self] setAllowOpusPassthru:_allowOpusPassthru];
+    }
+    _allowOpusPassthru = allowOpusPassthru;
+}
+
 - (void)setAllowTrueHDPassthru:(BOOL)allowTrueHDPassthru
 {
     if (allowTrueHDPassthru != _allowTrueHDPassthru)
@@ -131,6 +149,15 @@
         [[self.undo prepareWithInvocationTarget:self] setAllowTrueHDPassthru:_allowTrueHDPassthru];
     }
     _allowTrueHDPassthru = allowTrueHDPassthru;
+}
+
+- (void)setAllowALACPassthru:(BOOL)allowALACPassthru
+{
+    if (allowALACPassthru != _allowALACPassthru)
+    {
+        [[self.undo prepareWithInvocationTarget:self] setAllowALACPassthru:_allowALACPassthru];
+    }
+    _allowALACPassthru = allowALACPassthru;
 }
 
 - (void)setAllowFLACPassthru:(BOOL)allowFLACPassthru
@@ -183,7 +210,7 @@
 
 #pragma mark - HBPresetCoding
 
-- (void)applyPreset:(HBPreset *)preset
+- (BOOL)applyPreset:(HBPreset *)preset error:(NSError * __autoreleasing *)outError
 {
     // Track selection behavior
     if ([preset[@"AudioTrackSelectionBehavior"] isEqualToString:@"first"])
@@ -215,6 +242,7 @@
     self.allowFLACPassthru   = NO;
     self.allowMP2Passthru    = NO;
     self.allowMP3Passthru    = NO;
+    self.allowOpusPassthru   = NO;
     self.allowTrueHDPassthru = NO;
 
     // then, enable allowed passthru encoders
@@ -240,6 +268,9 @@
                 case HB_ACODEC_EAC3_PASS:
                     self.allowEAC3Passthru = YES;
                     break;
+                case HB_ACODEC_ALAC_PASS:
+                    self.allowALACPassthru = YES;
+                    break;
                 case HB_ACODEC_FLAC_PASS:
                     self.allowFLACPassthru = YES;
                     break;
@@ -248,6 +279,12 @@
                     break;
                 case HB_ACODEC_MP3_PASS:
                     self.allowMP3Passthru = YES;
+                    break;
+                case HB_ACODEC_VORBIS_PASS:
+                    self.allowVorbisPassthru = YES;
+                    break;
+                case HB_ACODEC_OPUS_PASS:
+                    self.allowOpusPassthru = YES;
                     break;
                 case HB_ACODEC_TRUEHD_PASS:
                     self.allowTrueHDPassthru = YES;
@@ -300,11 +337,13 @@
         newTrack.gain = [track[@"AudioTrackGainSlider"] doubleValue];
         [self insertObject:newTrack inTracksArrayAtIndex:[self countOfTracksArray]];
     }
+
+    return YES;
 }
 
 - (void)applyPreset:(HBPreset *)preset jobSettings:(NSDictionary *)settings
 {
-    [self applyPreset:preset];
+    [self applyPreset:preset error:NULL];
 }
 
 - (void)writeToPreset:(HBMutablePreset *)preset
@@ -354,9 +393,21 @@
     {
         [copyMask addObject:@(hb_audio_encoder_get_short_name(HB_ACODEC_MP3_PASS))];
     }
+    if (self.allowVorbisPassthru)
+    {
+        [copyMask addObject:@(hb_audio_encoder_get_short_name(HB_ACODEC_VORBIS_PASS))];
+    }
+    if (self.allowOpusPassthru)
+    {
+        [copyMask addObject:@(hb_audio_encoder_get_short_name(HB_ACODEC_OPUS_PASS))];
+    }
     if (self.allowTrueHDPassthru)
     {
         [copyMask addObject:@(hb_audio_encoder_get_short_name(HB_ACODEC_TRUEHD_PASS))];
+    }
+    if (self.allowALACPassthru)
+    {
+        [copyMask addObject:@(hb_audio_encoder_get_short_name(HB_ACODEC_ALAC_PASS))];
     }
     if (self.allowFLACPassthru)
     {
@@ -368,7 +419,7 @@
 
     preset[@"AudioSecondaryEncoderMode"] = @(self.secondaryEncoderMode);
 
-    NSMutableArray *audioList = [[NSMutableArray alloc] init];
+    NSMutableArray<NSDictionary *> *audioList = [[NSMutableArray alloc] init];
 
     for (HBAudioTrackPreset *track in self.tracksArray)
     {
@@ -377,14 +428,19 @@
         {
             sampleRate = @(hb_audio_samplerate_get_name(track.sampleRate));
         }
-        NSDictionary *newTrack = @{@"AudioEncoder": @(hb_audio_encoder_get_short_name(track.encoder)),
-                                   @"AudioMixdown": @(hb_mixdown_get_short_name(track.mixdown)),
-                                   @"AudioSamplerate": sampleRate,
-                                   @"AudioBitrate": @(track.bitRate),
-                                   @"AudioTrackDRCSlider": @(track.drc),
-                                   @"AudioTrackGainSlider": @(track.gain)};
+        const char *encoderShortName = hb_audio_encoder_get_short_name(track.encoder);
+        const char *mixdownShortName = hb_mixdown_get_short_name(track.mixdown);
+        if (encoderShortName && mixdownShortName)
+        {
+            NSDictionary *newTrack = @{@"AudioEncoder": @(encoderShortName),
+                                       @"AudioMixdown": @(mixdownShortName),
+                                       @"AudioSamplerate": sampleRate,
+                                       @"AudioBitrate": @(track.bitRate),
+                                       @"AudioTrackDRCSlider": @(track.drc),
+                                       @"AudioTrackGainSlider": @(track.gain)};
 
-        [audioList addObject:newTrack];
+            [audioList addObject:newTrack];
+        }
     }
 
     preset[@"AudioList"] = audioList;
@@ -441,6 +497,7 @@
         copy->_allowDTSPassthru = _allowDTSPassthru;
         copy->_allowMP2Passthru = _allowMP2Passthru;
         copy->_allowMP3Passthru = _allowMP3Passthru;
+        copy->_allowOpusPassthru = _allowOpusPassthru;
         copy->_allowTrueHDPassthru = _allowTrueHDPassthru;
         copy->_allowFLACPassthru = _allowFLACPassthru;
 
@@ -475,6 +532,7 @@
     encodeBool(_allowDTSPassthru);
     encodeBool(_allowMP2Passthru);
     encodeBool(_allowMP3Passthru);
+    encodeBool(_allowOpusPassthru);
     encodeBool(_allowTrueHDPassthru);
     encodeBool(_allowFLACPassthru);
 
@@ -503,6 +561,7 @@
     decodeBool(_allowDTSPassthru);
     decodeBool(_allowMP2Passthru);
     decodeBool(_allowMP3Passthru);
+    decodeBool(_allowOpusPassthru);
     decodeBool(_allowTrueHDPassthru);
     decodeBool(_allowFLACPassthru);
 

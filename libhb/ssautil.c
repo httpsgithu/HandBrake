@@ -1,6 +1,6 @@
 /* ssautil.c
 
-   Copyright (c) 2003-2021 HandBrake Team
+   Copyright (c) 2003-2024 HandBrake Team
    This file is part of the HandBrake source code
    Homepage: <http://handbrake.fr/>.
    It may be used under the terms of the GNU General Public License v2.
@@ -116,6 +116,11 @@ static int ssa_update_style(const char *ssa, hb_subtitle_style_context_t *ctx)
         // Skip any malformed markup junk
         while (strchr("\\}", ssa[pos]) == NULL) pos++;
         pos++;
+        // Early exit if there is no tag
+        if (ssa[pos] == '\0')
+        {
+            break;
+        }
         // Check for an index that is in some markup (e.g. font color)
         if (isdigit(ssa[pos]))
         {
@@ -383,7 +388,7 @@ static const char * field_value(char ** style, int index)
     return NULL;
 }
 
-typedef struct ssa_style_indicies_s
+typedef struct ssa_style_indices_s
 {
     int style_name_index;
     int font_name_index;
@@ -395,9 +400,9 @@ typedef struct ssa_style_indicies_s
     int bold_index;
     int italic_index;
     int underline_index;
-} ssa_style_indicies_t;
+} ssa_style_indices_t;
 
-static void fill_field_indicies(char **fields, ssa_style_indicies_t * indices)
+static void fill_field_indices(char **fields, ssa_style_indices_t * indices)
 {
     indices->style_name_index = field_index(fields, "Name");
     indices->font_name_index  = field_index(fields, "Fontname");
@@ -412,7 +417,7 @@ static void fill_field_indicies(char **fields, ssa_style_indicies_t * indices)
 }
 
 static int add_style(hb_subtitle_style_context_t *ctx,
-                      char ** style, ssa_style_indicies_t *field_indices)
+                      char ** style, ssa_style_indices_t *field_indices)
 {
     const char * name;
     const char * value;
@@ -600,9 +605,9 @@ hb_subtitle_style_context_t * hb_subtitle_style_init(const char * ssa_header)
 
                 if (fields != NULL)
                 {
-                    ssa_style_indicies_t field_indices;
+                    ssa_style_indices_t field_indices;
 
-                    fill_field_indicies(fields, &field_indices);
+                    fill_field_indices(fields, &field_indices);
 
                     pos    = strstr(pos, "\nStyle:");
                     while (pos != NULL)

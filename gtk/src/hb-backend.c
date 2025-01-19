@@ -1,64 +1,59 @@
-/*
- * hb-backend.c
- * Copyright (C) John Stebbins 2008-2021 <stebbins@stebbins>
+/* hb-backend.c
  *
- * hb-backend.c is free software.
+ * Copyright (C) 2008-2024 John Stebbins <stebbins@stebbins>
  *
- * You may redistribute it and/or modify it under the terms of the
- * GNU General Public License version 2, as published by the Free Software
- * Foundation.
+ * This program is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU General Public License version 2,
+ * as published by the Free Software Foundation.
  *
- * hb-backend.c is distributed in the hope that it will be useful,
+ * This program is distributed in the hope that it will be useful,
  * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.
- * See the GNU General Public License for more details.
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ * GNU General Public License for more details.
  *
  * You should have received a copy of the GNU General Public License
- * along with main.c.  If not, write to:
- *  The Free Software Foundation, Inc.,
- *  51 Franklin Street, Fifth Floor
- *  Boston, MA  02110-1301, USA.
+ * along with this program.  If not, see <https://www.gnu.org/licenses/>.
+ *
+ * SPDX-License-Identifier: GPL-2.0-only
  */
 
 #define _GNU_SOURCE
-#include <limits.h>
-#include <ctype.h>
-#include <math.h>
-#include "handbrake/handbrake.h"
-#include "ghbcompat.h"
-#include <glib/gstdio.h>
-#include <glib/gi18n.h>
+
 #include "hb-backend.h"
-#include "settings.h"
-#include "jobdict.h"
-#include "callbacks.h"
-#include "subtitlehandler.h"
+
+#include "application.h"
 #include "audiohandler.h"
-#include "videohandler.h"
-#include "preview.h"
+#include "callbacks.h"
+#include "jobdict.h"
 #include "presets.h"
-#include "values.h"
-#include "handbrake/lang.h"
-#include "jansson.h"
+#include "preview.h"
+#include "subtitlehandler.h"
+#include "title-add.h"
+#include "videohandler.h"
+
+#include <ctype.h>
+#include <jansson.h>
+#include <limits.h>
+#include <math.h>
 
 typedef struct
 {
-    gchar *option;
-    const gchar *shortOpt;
-    gdouble ivalue;
+    const char *option;
+    const char *shortOpt;
+    double ivalue;
 } options_map_t;
 
 typedef struct
 {
-    gint count;
+    int count;
     options_map_t *map;
 } combo_opts_t;
 
 static options_map_t d_subtitle_track_sel_opts[] =
 {
-    {N_("None"),                                    "none",       0},
-    {N_("First Track Matching Selected Languages"), "first",      1},
-    {N_("All Tracks Matching Selected Languages"),  "all",        2},
+    {N_("None"),                              "none",  0},
+    {N_("First Matching Selected Languages"), "first", 1},
+    {N_("All Matching Selected Languages"),   "all",   2},
 };
 combo_opts_t subtitle_track_sel_opts =
 {
@@ -81,9 +76,9 @@ combo_opts_t subtitle_burn_opts =
 
 static options_map_t d_audio_track_sel_opts[] =
 {
-    {N_("None"),                                    "none",       0},
-    {N_("First Track Matching Selected Languages"), "first",      1},
-    {N_("All Tracks Matching Selected Languages"),  "all",        2},
+    {N_("None"),                              "none",  0},
+    {N_("First Matching Selected Languages"), "first", 1},
+    {N_("All Matching Selected Languages"),   "all",   2},
 };
 combo_opts_t audio_track_sel_opts =
 {
@@ -106,8 +101,7 @@ combo_opts_t point_to_point_opts =
 static options_map_t d_when_complete_opts[] =
 {
     {N_("Do Nothing"),            "nothing",  0},
-    {N_("Show Notification"),     "notify",   1},
-    {N_("Quit Handbrake"),        "quit",     4},
+    {N_("Quit Handbrake"),        "quit",     1},
     {N_("Put Computer To Sleep"), "sleep",    2},
     {N_("Shutdown Computer"),     "shutdown", 3},
 };
@@ -119,10 +113,9 @@ combo_opts_t when_complete_opts =
 
 static options_map_t d_par_opts[] =
 {
-    {N_("Off"),       "off",    HB_ANAMORPHIC_NONE},
-    {N_("Automatic"), "auto",   HB_ANAMORPHIC_AUTO},
-    {N_("Loose"),     "loose",  HB_ANAMORPHIC_LOOSE},
-    {N_("Custom"),    "custom", HB_ANAMORPHIC_CUSTOM},
+    {N_("Automatic"),     "auto",   HB_ANAMORPHIC_AUTO},
+    {N_("None"),          "off",    HB_ANAMORPHIC_NONE},
+    {N_("Custom"),        "custom", HB_ANAMORPHIC_CUSTOM},
 };
 combo_opts_t par_opts =
 {
@@ -169,19 +162,6 @@ combo_opts_t log_longevity_opts =
     d_log_longevity_opts
 };
 
-static options_map_t d_appcast_update_opts[] =
-{
-    {N_("Never"),   "never",   0},
-    {N_("Daily"),   "daily",   1},
-    {N_("Weekly"),  "weekly",  2},
-    {N_("Monthly"), "monthly", 3},
-};
-combo_opts_t appcast_update_opts =
-{
-    sizeof(d_appcast_update_opts)/sizeof(options_map_t),
-    d_appcast_update_opts
-};
-
 static options_map_t d_vqual_granularity_opts[] =
 {
     {"0.2",  "0.2",  0.2 },
@@ -197,9 +177,10 @@ combo_opts_t vqual_granularity_opts =
 
 static options_map_t d_deint_opts[] =
 {
-    {N_("Off"),         "off",         HB_FILTER_INVALID    },
-    {N_("Decomb"),      "decomb",      HB_FILTER_DECOMB     },
-    {N_("Yadif"),       "deinterlace", HB_FILTER_DEINTERLACE},
+    {N_("Off"),         "off",         HB_FILTER_INVALID},
+    {N_("Decomb"),      "decomb",      HB_FILTER_DECOMB },
+    {N_("Yadif"),       "deinterlace", HB_FILTER_YADIF  },
+    {N_("Bwdif"),       "bwdif",       HB_FILTER_BWDIF  },
 };
 combo_opts_t deint_opts =
 {
@@ -231,17 +212,75 @@ combo_opts_t sharpen_opts =
     d_sharpen_opts
 };
 
+static options_map_t d_crop_opts[] =
+{
+    {N_("None"),         "none",         0},
+    {N_("Conservative"), "conservative", 1},
+    {N_("Automatic"),    "auto",         2},
+    {N_("Custom"),       "custom",       3},
+};
+combo_opts_t crop_opts =
+{
+    sizeof(d_crop_opts)/sizeof(options_map_t),
+    d_crop_opts
+};
+
 static options_map_t d_rotate_opts[] =
 {
-    {N_("Off"),         "disable=1",   0},
-    {N_("90 Degrees"),  "angle=90",   90},
-    {N_("180 Degrees"), "angle=180", 180},
-    {N_("270 Degrees"), "angle=270", 270},
+    {N_("Off"),    "0",   0},
+    {N_("90°"),   "90",  90},
+    {N_("180°"), "180", 180},
+    {N_("270°"), "270", 270},
 };
 combo_opts_t rotate_opts =
 {
     sizeof(d_rotate_opts)/sizeof(options_map_t),
     d_rotate_opts
+};
+
+static options_map_t d_resolution_opts[] =
+{
+    {N_("4320p 8K Ultra HD"),  "4320p",  4320},
+    {N_("2160p 4K Ultra HD"),  "2160p",  2160},
+    {N_("1440p 2.5K Quad HD"), "1440p",  1440},
+    {N_("1080p Full HD"),      "1080p",  1080},
+    {N_("720p HD"),            "720p",   720},
+    {N_("576p PAL"),           "576p",   576},
+    {N_("480p NTSC"),          "480p",   480},
+    {N_("None"),               "none",   0},
+    {N_("Custom"),             "custom", 1},
+};
+combo_opts_t resolution_opts =
+{
+    sizeof(d_resolution_opts)/sizeof(options_map_t),
+    d_resolution_opts
+};
+
+static options_map_t d_pad_opts[] =
+{
+    {N_("None"),               "none",      0},
+    {N_("Height (Letterbox)"), "letterbox", 1},
+    {N_("Width (Pillarbox)"),  "pillarbox", 2},
+    {N_("Width &amp; Height"), "fill",      3},
+    {N_("Custom"),             "custom",    4},
+};
+combo_opts_t pad_opts =
+{
+    sizeof(d_pad_opts)/sizeof(options_map_t),
+    d_pad_opts
+};
+
+static options_map_t d_pad_color_opts[] =
+{
+    {N_("Black"),     "black",         0},
+    {N_("Dark Gray"), "darkslategray", 1},
+    {N_("Gray"),      "slategray",     2},
+    {N_("White"),     "white",         3},
+};
+combo_opts_t pad_color_opts =
+{
+    sizeof(d_pad_color_opts)/sizeof(options_map_t),
+    d_pad_color_opts
 };
 
 static options_map_t d_direct_opts[] =
@@ -360,6 +399,18 @@ typedef struct
     gboolean preset;
 } filter_opts_t;
 
+static filter_opts_t chroma_smooth_preset_opts =
+{
+    .filter_id = HB_FILTER_CHROMA_SMOOTH,
+    .preset    = TRUE
+};
+
+static filter_opts_t chroma_smooth_tune_opts =
+{
+    .filter_id = HB_FILTER_CHROMA_SMOOTH,
+    .preset    = FALSE
+};
+
 static filter_opts_t deblock_preset_opts =
 {
     .filter_id = HB_FILTER_DEBLOCK,
@@ -375,6 +426,12 @@ static filter_opts_t deblock_tune_opts =
 static filter_opts_t deint_preset_opts =
 {
     .filter_id = HB_FILTER_DECOMB,
+    .preset    = TRUE
+};
+
+static filter_opts_t colorspace_preset_opts =
+{
+    .filter_id = HB_FILTER_COLORSPACE,
     .preset    = TRUE
 };
 
@@ -420,6 +477,26 @@ static filter_opts_t detel_opts =
 {
     .filter_id = HB_FILTER_DETELECINE,
     .preset    = TRUE
+};
+
+typedef struct
+{
+    const gchar * shortOpt;
+    int           width;
+    int           height;
+} resolution_map_t;
+
+static resolution_map_t resolution_to_opts[] =
+{
+    {"4320p",  7680, 4320},
+    {"2160p",  3840, 2160},
+    {"1440p",  2560, 1440},
+    {"1080p",  1920, 1080},
+    {"720p",   1280,  720},
+    {"576p",    720,  576},
+    {"480p",    720,  480},
+    {"none",      0,    0},
+    {NULL,        0,    0},
 };
 
 typedef void (*opts_set_f)(signal_user_data_t *ud, const gchar *name,
@@ -517,6 +594,12 @@ combo_name_map_t combo_name_map[] =
         generic_opt_get
     },
     {
+        "MainWhenComplete",
+        &when_complete_opts,
+        small_opts_set,
+        generic_opt_get
+    },
+    {
         "QueueWhenComplete",
         &when_complete_opts,
         small_opts_set,
@@ -529,12 +612,6 @@ combo_name_map_t combo_name_map[] =
         generic_opt_get
     },
     {
-        "PictureModulus",
-        &alignment_opts,
-        small_opts_set,
-        generic_opt_get
-    },
-    {
         "LoggingLevel",
         &logging_opts,
         small_opts_set,
@@ -543,12 +620,6 @@ combo_name_map_t combo_name_map[] =
     {
         "LogLongevity",
         &log_longevity_opts,
-        small_opts_set,
-        generic_opt_get
-    },
-    {
-        "check_updates",
-        &appcast_update_opts,
         small_opts_set,
         generic_opt_get
     },
@@ -601,6 +672,12 @@ combo_name_map_t combo_name_map[] =
         generic_opt_get
     },
     {
+        "PictureColorspacePreset",
+        &colorspace_preset_opts,
+        filter_opts_set,
+        filter_opt_get
+    },
+    {
         "PictureDenoisePreset",
         &nlmeans_preset_opts,
         denoise_opts_set,
@@ -609,6 +686,18 @@ combo_name_map_t combo_name_map[] =
     {
         "PictureDenoiseTune",
         &nlmeans_tune_opts,
+        filter_opts_set,
+        filter_opt_get
+    },
+    {
+        "PictureChromaSmoothPreset",
+        &chroma_smooth_preset_opts,
+        filter_opts_set,
+        filter_opt_get
+    },
+    {
+        "PictureChromaSmoothTune",
+        &chroma_smooth_tune_opts,
         filter_opts_set,
         filter_opt_get
     },
@@ -631,8 +720,32 @@ combo_name_map_t combo_name_map[] =
         filter_opt_get
     },
     {
-        "PictureRotate",
+        "rotate",
         &rotate_opts,
+        small_opts_set,
+        generic_opt_get
+    },
+    {
+        "crop_mode",
+        &crop_opts,
+        small_opts_set,
+        generic_opt_get
+    },
+    {
+        "resolution_limit",
+        &resolution_opts,
+        small_opts_set,
+        generic_opt_get
+    },
+    {
+        "PicturePadMode",
+        &pad_opts,
+        small_opts_set,
+        generic_opt_get
+    },
+    {
+        "PicturePadColor",
+        &pad_color_opts,
         small_opts_set,
         generic_opt_get
     },
@@ -791,6 +904,42 @@ ghb_lookup_lang(const GhbValue *glang)
     return lang_lookup_index(str);
 }
 
+const gchar *
+ghb_lookup_resolution_limit(int width, int height)
+{
+    int ii;
+
+    for (ii = 0; resolution_to_opts[ii].shortOpt != NULL; ii++)
+    {
+        if (resolution_to_opts[ii].width == width &&
+            resolution_to_opts[ii].height == height)
+        {
+            return resolution_to_opts[ii].shortOpt;
+        }
+    }
+    return "custom";
+}
+
+int
+ghb_lookup_resolution_limit_dimensions(const gchar * opt,
+                                       int * width, int * height)
+{
+    int ii;
+
+    for (ii = 0; resolution_to_opts[ii].shortOpt != NULL; ii++)
+    {
+        if (!strcmp(opt, resolution_to_opts[ii].shortOpt))
+        {
+            *width  = resolution_to_opts[ii].width;
+            *height = resolution_to_opts[ii].height;
+            return 0;
+        }
+    }
+    *width  = -1;
+    *height = -1;
+    return 1;
+}
+
 static void
 del_tree(const gchar *name, gboolean del_top)
 {
@@ -819,7 +968,7 @@ del_tree(const gchar *name, gboolean del_top)
 }
 
 const gchar*
-ghb_version()
+ghb_version (void)
 {
     return hb_get_version(NULL);
 }
@@ -845,6 +994,9 @@ ghb_vquality_default(signal_user_data_t *ud)
     case HB_VCODEC_FFMPEG_MPEG2:
     case HB_VCODEC_FFMPEG_MPEG4:
         return 3;
+    case HB_VCODEC_SVT_AV1_8BIT:
+    case HB_VCODEC_SVT_AV1_10BIT:
+        return 30;
     default:
     {
         float min, max, step;
@@ -889,7 +1041,7 @@ ghb_vquality_range(
         *digits = 1;
 }
 
-gint
+static gint
 find_opt_entry(const combo_opts_t *opts, const GhbValue *gval)
 {
     gint ii;
@@ -929,7 +1081,7 @@ find_opt_entry(const combo_opts_t *opts, const GhbValue *gval)
     return opts->count;
 }
 
-const hb_filter_param_t*
+static const hb_filter_param_t*
 find_param_entry(const hb_filter_param_t *param, const GhbValue *gval)
 {
     gint ii;
@@ -1074,8 +1226,8 @@ hb_handle_t* ghb_live_handle(void)
     return h_live;
 }
 
-gchar*
-ghb_get_tmp_dir()
+const char*
+ghb_get_tmp_dir (void)
 {
     return hb_get_temporary_directory();
 }
@@ -1083,11 +1235,7 @@ ghb_get_tmp_dir()
 void
 ghb_hb_cleanup(gboolean partial)
 {
-    char * dir;
-
-    dir = hb_get_temporary_directory();
-    del_tree(dir, !partial);
-    free(dir);
+    del_tree(hb_get_temporary_directory(), !partial);
 }
 
 gint
@@ -1155,16 +1303,16 @@ grey_combo_box_item(GtkComboBox *combo, gint value, gboolean grey)
 }
 
 static void
-grey_builder_combo_box_item(GtkBuilder *builder, const gchar *name, gint value, gboolean grey)
+grey_builder_combo_box_item(const gchar *name, gint value, gboolean grey)
 {
-    GtkComboBox *combo = GTK_COMBO_BOX(GHB_WIDGET(builder, name));
+    GtkComboBox *combo = GTK_COMBO_BOX(ghb_builder_widget(name));
     grey_combo_box_item(combo, value, grey);
 }
 
 void
 ghb_mix_opts_filter(GtkComboBox *combo, gint acodec)
 {
-    g_debug("ghb_mix_opts_filter()\n");
+    ghb_log_func();
 
     const hb_mixdown_t *mix;
     for (mix = hb_mixdown_get_next(NULL); mix != NULL;
@@ -1176,15 +1324,15 @@ ghb_mix_opts_filter(GtkComboBox *combo, gint acodec)
 }
 
 static void
-grey_mix_opts(signal_user_data_t *ud, gint acodec, gint64 layout)
+grey_mix_opts(signal_user_data_t *ud, gint acodec, uint64_t layout)
 {
-    g_debug("grey_mix_opts()\n");
+    ghb_log_func();
 
     const hb_mixdown_t *mix;
     for (mix = hb_mixdown_get_next(NULL); mix != NULL;
          mix = hb_mixdown_get_next(mix))
     {
-        grey_builder_combo_box_item(ud->builder, "AudioMixdown", mix->amixdown,
+        grey_builder_combo_box_item("AudioMixdown", mix->amixdown,
                 !hb_mixdown_is_supported(mix->amixdown, acodec, layout));
     }
 }
@@ -1204,8 +1352,7 @@ static void grey_passthru(signal_user_data_t *ud, hb_audio_config_t *aconfig)
         if ((enc->codec & HB_ACODEC_MASK) !=
             (aconfig->in.codec & HB_ACODEC_MASK))
         {
-            grey_builder_combo_box_item(ud->builder, "AudioEncoder",
-                enc->codec, TRUE);
+            grey_builder_combo_box_item("AudioEncoder", enc->codec, TRUE);
         }
     }
 }
@@ -1235,17 +1382,13 @@ ghb_grey_combo_options(signal_user_data_t *ud)
     {
         if (!(mux->format & enc->muxers) && enc->codec != HB_ACODEC_NONE)
         {
-            grey_builder_combo_box_item(ud->builder, "AudioEncoder",
-                enc->codec, TRUE);
-            grey_builder_combo_box_item(ud->builder, "AudioEncoderFallback",
-                enc->codec, TRUE);
+            grey_builder_combo_box_item("AudioEncoder", enc->codec, TRUE);
+            grey_builder_combo_box_item("AudioEncoderFallback", enc->codec, TRUE);
         }
         else
         {
-            grey_builder_combo_box_item(ud->builder, "AudioEncoder",
-                enc->codec, FALSE);
-            grey_builder_combo_box_item(ud->builder, "AudioEncoderFallback",
-                enc->codec, FALSE);
+            grey_builder_combo_box_item("AudioEncoder", enc->codec, FALSE);
+            grey_builder_combo_box_item("AudioEncoderFallback", enc->codec, FALSE);
         }
     }
     for (enc = hb_video_encoder_get_next(NULL); enc != NULL;
@@ -1253,20 +1396,18 @@ ghb_grey_combo_options(signal_user_data_t *ud)
     {
         if (!(mux->format & enc->muxers))
         {
-            grey_builder_combo_box_item(ud->builder, "VideoEncoder",
-                enc->codec, TRUE);
+            grey_builder_combo_box_item("VideoEncoder", enc->codec, TRUE);
         }
         else
         {
-            grey_builder_combo_box_item(ud->builder, "VideoEncoder",
-                enc->codec, FALSE);
+            grey_builder_combo_box_item("VideoEncoder", enc->codec, FALSE);
         }
     }
     grey_passthru(ud, aconfig);
 
     acodec = ghb_settings_audio_encoder_codec(ud->settings, "AudioEncoder");
 
-    gint64 layout = aconfig != NULL ? aconfig->in.channel_layout : ~0;
+    uint64_t layout = aconfig != NULL ? aconfig->in.channel_layout : UINT64_MAX;
     guint32 in_codec = aconfig != NULL ? aconfig->in.codec : 0;
     fallback = ghb_select_fallback(ud->settings, acodec);
     gint copy_mask = ghb_get_copy_mask(ud->settings);
@@ -1291,7 +1432,7 @@ ghb_init_combo_box(GtkComboBox *combo)
     GtkListStore *store;
     GtkCellRenderer *cell;
 
-    g_debug("ghb_init_combo_box()\n");
+    ghb_log_func();
     // First modify the combobox model to allow greying out of options
     if (combo == NULL)
         return;
@@ -1303,6 +1444,7 @@ ghb_init_combo_box(GtkComboBox *combo)
     store = gtk_list_store_new(4, G_TYPE_STRING, G_TYPE_BOOLEAN,
                                G_TYPE_STRING, G_TYPE_DOUBLE);
     gtk_combo_box_set_model(combo, GTK_TREE_MODEL(store));
+    gtk_combo_box_set_id_column(combo, 2);
 
     if (!gtk_combo_box_get_has_entry(combo))
     {
@@ -1318,18 +1460,6 @@ ghb_init_combo_box(GtkComboBox *combo)
     { // Combo box entry
         gtk_combo_box_set_entry_text_column(GTK_COMBO_BOX(combo), 0);
     }
-}
-
-// Set up the model for the combo box
-static void
-init_combo_box(GtkBuilder *builder, const gchar *name)
-{
-    GtkComboBox *combo;
-
-    g_debug("init_combo_box() %s\n", name);
-    // First modify the combobox model to allow greying out of options
-    combo = GTK_COMBO_BOX(GHB_WIDGET(builder, name));
-    ghb_init_combo_box(combo);
 }
 
 void
@@ -1375,7 +1505,7 @@ audio_samplerate_opts_set(signal_user_data_t *ud, const gchar *name,
     (void)opts; // Silence "unused variable" warning
     (void)data; // Silence "unused variable" warning
 
-    GtkComboBox *combo = GTK_COMBO_BOX(GHB_WIDGET(ud->builder, name));
+    GtkComboBox *combo = GTK_COMBO_BOX(ghb_builder_widget(name));
     ghb_audio_samplerate_opts_set(combo);
 }
 
@@ -1476,7 +1606,7 @@ video_framerate_opts_set(signal_user_data_t *ud, const gchar *name,
     GtkTreeIter iter;
     GtkListStore *store;
 
-    GtkComboBox *combo = GTK_COMBO_BOX(GHB_WIDGET(ud->builder, name));
+    GtkComboBox *combo = GTK_COMBO_BOX(ghb_builder_widget(name));
     store = GTK_LIST_STORE(gtk_combo_box_get_model (combo));
     gtk_list_store_clear(store);
     // Add an item for "Same As Source"
@@ -1492,8 +1622,8 @@ video_framerate_opts_set(signal_user_data_t *ud, const gchar *name,
     for (rate = hb_video_framerate_get_next(NULL); rate != NULL;
          rate = hb_video_framerate_get_next(rate))
     {
-        gchar *desc = "";
-        gchar *option;
+        const char *desc = "";
+        char *option;
         if (strcmp(rate->name, "23.976") == 0)
         {
             desc = _("(NTSC Film)");
@@ -1578,7 +1708,7 @@ video_encoder_opts_set(signal_user_data_t *ud, const gchar *name,
     GtkListStore *store;
     gchar *str;
 
-    GtkComboBox *combo = GTK_COMBO_BOX(GHB_WIDGET(ud->builder, name));
+    GtkComboBox *combo = GTK_COMBO_BOX(ghb_builder_widget(name));
     store = GTK_LIST_STORE(gtk_combo_box_get_model (combo));
     gtk_list_store_clear(store);
 
@@ -1621,6 +1751,9 @@ ghb_lookup_video_encoder(const char *name)
 int
 ghb_lookup_video_encoder_codec(const char *name)
 {
+    if (!name)
+        return -1;
+
     return ghb_lookup_video_encoder(name)->codec;
 }
 
@@ -1735,17 +1868,6 @@ ghb_settings_audio_encoder(const GhbValue *settings, const char *name)
     return ghb_lookup_audio_encoder(encoder_id);
 }
 
-static void
-audio_encoder_opts_set_with_mask(
-    GtkBuilder *builder,
-    const gchar *name,
-    int mask,
-    int neg_mask)
-{
-    GtkComboBox *combo = GTK_COMBO_BOX(GHB_WIDGET(builder, name));
-    ghb_audio_encoder_opts_set_with_mask(combo, mask, neg_mask);
-}
-
 void
 ghb_audio_encoder_opts_set(GtkComboBox *combo)
 {
@@ -1759,7 +1881,8 @@ audio_encoder_opts_set(signal_user_data_t *ud, const gchar *name,
 {
     (void)opts; // Silence "unused variable" warning
     (void)data; // Silence "unused variable" warning
-    GtkComboBox *combo = GTK_COMBO_BOX(GHB_WIDGET(ud->builder, name));
+
+    GtkComboBox *combo = GTK_COMBO_BOX(ghb_builder_widget(name));
     ghb_audio_encoder_opts_set_with_mask(combo, ~0, HB_ACODEC_NONE);
 }
 
@@ -1770,7 +1893,8 @@ acodec_fallback_opts_set(signal_user_data_t *ud, const gchar *name,
     (void)opts; // Silence "unused variable" warning
     (void)data; // Silence "unused variable" warning
 
-    audio_encoder_opts_set_with_mask(ud->builder, name, ~0, HB_ACODEC_PASS_FLAG);
+    GtkComboBox *combo = GTK_COMBO_BOX(ghb_builder_widget(name));
+    ghb_audio_encoder_opts_set_with_mask(combo, ~0, HB_ACODEC_PASS_FLAG);
 }
 
 void
@@ -1846,7 +1970,7 @@ mix_opts_set(signal_user_data_t *ud, const gchar *name,
     (void)opts; // Silence "unused variable" warning
     (void)data; // Silence "unused variable" warning
 
-    GtkComboBox *combo = GTK_COMBO_BOX(GHB_WIDGET(ud->builder, name));
+    GtkComboBox *combo = GTK_COMBO_BOX(ghb_builder_widget(name));
     ghb_mix_opts_set(combo);
 }
 
@@ -1860,7 +1984,7 @@ container_opts_set(signal_user_data_t *ud, const gchar *name,
     GtkListStore *store;
     gchar *str;
 
-    GtkComboBox *combo = GTK_COMBO_BOX(GHB_WIDGET(ud->builder, name));
+    GtkComboBox *combo = GTK_COMBO_BOX(ghb_builder_widget(name));
     store = GTK_LIST_STORE(gtk_combo_box_get_model (combo));
     gtk_list_store_clear(store);
 
@@ -1881,7 +2005,7 @@ container_opts_set(signal_user_data_t *ud, const gchar *name,
 }
 
 static void
-preset_category_opts_set(signal_user_data_t *ud, const gchar *name,
+preset_category_opts_set(signal_user_data_t *ud, const char *opt_name,
                          void *opts, const void* data)
 {
     (void)opts; // Silence "unused variable" warning
@@ -1896,7 +2020,7 @@ preset_category_opts_set(signal_user_data_t *ud, const gchar *name,
     presets = hb_presets_get();
     count   = hb_value_array_len(presets);
 
-    combo = GTK_COMBO_BOX(GHB_WIDGET(ud->builder, name));
+    combo = GTK_COMBO_BOX(ghb_builder_widget(opt_name));
     store = GTK_LIST_STORE(gtk_combo_box_get_model (combo));
     gtk_list_store_clear(store);
 
@@ -1906,9 +2030,10 @@ preset_category_opts_set(signal_user_data_t *ud, const gchar *name,
         const char * name;
         hb_value_t * folder = hb_value_array_get(presets, ii);
 
-        if (!hb_value_get_bool(hb_dict_get(folder, "Folder")))
+        if (!hb_value_get_bool(hb_dict_get(folder, "Folder")) ||
+            hb_value_get_int(hb_dict_get(folder, "Type")) != 1)
         {
-            // Only list folders
+            // Only list custom folders
             continue;
         }
 
@@ -1918,7 +2043,7 @@ preset_category_opts_set(signal_user_data_t *ud, const gchar *name,
             continue;
         }
 
-        if (ghb_strv_contains((const char**)categories, name))
+        if (g_strv_contains((const char**)categories, name))
         {
             // Category is already in the list
             continue;
@@ -1972,9 +2097,9 @@ srt_codeset_opts_set(signal_user_data_t *ud, const gchar *name,
     (void)data; // Silence "unused variable" warning
     GtkTreeIter iter;
     GtkListStore *store;
-    gint ii;
+    guint ii;
 
-    GtkComboBox *combo = GTK_COMBO_BOX(GHB_WIDGET(ud->builder, name));
+    GtkComboBox *combo = GTK_COMBO_BOX(ghb_builder_widget(name));
     store = GTK_LIST_STORE(gtk_combo_box_get_model (combo));
     gtk_list_store_clear(store);
     for (ii = 0; ii < SRT_TABLE_SIZE; ii++)
@@ -1989,7 +2114,9 @@ srt_codeset_opts_set(signal_user_data_t *ud, const gchar *name,
     }
 }
 
-extern G_MODULE_EXPORT void combo_search_key_press_cb(void);
+extern G_MODULE_EXPORT gboolean
+combo_search_key_press_cb(GtkEventControllerKey *keycon, guint keyval,
+    guint keycode, GdkModifierType state, signal_user_data_t *ud);
 
 static void
 language_opts_set(signal_user_data_t *ud, const gchar *name,
@@ -2000,14 +2127,23 @@ language_opts_set(signal_user_data_t *ud, const gchar *name,
     GtkTreeIter iter;
     GtkListStore *store;
 
-    GtkComboBox *combo = GTK_COMBO_BOX(GHB_WIDGET(ud->builder, name));
+    GtkComboBox *combo = GTK_COMBO_BOX(ghb_builder_widget(name));
     store = GTK_LIST_STORE(gtk_combo_box_get_model (combo));
     gtk_list_store_clear(store);
     const iso639_lang_t *iso639;
     for (iso639 = lang_get_next(NULL); iso639 != NULL;
          iso639 = lang_get_next(iso639))
     {
-        int     index = lang_lookup_index(iso639->iso639_1);
+        int     index;
+
+        if (iso639->iso639_1 != NULL && iso639->iso639_1[0] != 0)
+        {
+            index = lang_lookup_index(iso639->iso639_1);
+        }
+        else
+        {
+            index = lang_lookup_index(iso639->iso639_2);
+        }
         gchar * lang;
 
         if (iso639->native_name[0] != 0)
@@ -2024,11 +2160,6 @@ language_opts_set(signal_user_data_t *ud, const gchar *name,
                            -1);
         g_free(lang);
     }
-#if !GTK_CHECK_VERSION(3, 90, 0)
-    // This is handled by GtkEventControllerKey in gtk4
-    // Initialized in ghb_combo_init()
-    g_signal_connect(combo, "key-press-event", combo_search_key_press_cb, ud);
-#endif
 }
 
 static void
@@ -2133,6 +2264,7 @@ camel_convert(gchar *str)
 
             } break;
             case CAMEL_FIRST_UPPER:
+            default:
             {
                 if (*str >= 'A' && *str <= 'Z')
                     *str = *str - 'A' + 'a';
@@ -2272,7 +2404,7 @@ title_opts_set(signal_user_data_t *ud, const gchar *name,
     gint count = 0;
 
 
-    GtkComboBox *combo = GTK_COMBO_BOX(GHB_WIDGET(ud->builder, name));
+    GtkComboBox *combo = GTK_COMBO_BOX(ghb_builder_widget(name));
     store = GTK_LIST_STORE(gtk_combo_box_get_model (combo));
     gtk_list_store_clear(store);
     if (h_scan != NULL)
@@ -2282,37 +2414,31 @@ title_opts_set(signal_user_data_t *ud, const gchar *name,
     }
     if( count <= 0 )
     {
-        char *opt;
-
         // No titles.  Fill in a default.
         gtk_list_store_append(store, &iter);
-        opt = g_strdup_printf("<small>%s</small>", _("No Titles"));
         gtk_list_store_set(store, &iter,
-                           0, opt,
+                           0, _("No Titles"),
                            1, TRUE,
                            2, "none",
                            3, -1.0,
                            -1);
-        g_free(opt);
         return;
     }
     for (ii = 0; ii < count; ii++)
     {
-        char *title_opt, *title_index, *opt;
+        char *title_opt, *title_index;
 
         title = hb_list_item(list, ii);
         title_opt = ghb_create_title_label(title);
-        opt = g_strdup_printf("<small>%s</small>", title_opt);
         title_index = g_strdup_printf("%d", title->index);
 
         gtk_list_store_append(store, &iter);
         gtk_list_store_set(store, &iter,
-                           0, opt,
+                           0, title_opt,
                            1, TRUE,
                            2, title_index,
                            3, (gdouble)title->index,
                            -1);
-        g_free(opt);
         g_free(title_opt);
         g_free(title_index);
     }
@@ -2341,7 +2467,7 @@ lookup_title_index(hb_handle_t *h, int title_id)
     return -1;
 }
 
-const hb_title_t*
+static const hb_title_t*
 lookup_title(hb_handle_t *h, int title_id, int *index)
 {
     int ii = lookup_title_index(h, title_id);
@@ -2406,27 +2532,19 @@ video_tune_opts_set(signal_user_data_t *ud, const gchar *name,
     tunes = hb_video_encoder_get_tunes(encoder);
 
     while (tunes && tunes[count]) count++;
-    GtkWidget *w = GHB_WIDGET(ud->builder, "VideoTune");
+    GtkWidget *w = ghb_builder_widget("VideoTune");
     gtk_widget_set_visible(w, count > 0);
-    w = GHB_WIDGET(ud->builder, "VideoTuneLabel");
+    w = ghb_builder_widget("VideoTuneLabel");
     gtk_widget_set_visible(w, count > 0);
     if (count == 0) return;
 
-    GtkComboBox *combo = GTK_COMBO_BOX(GHB_WIDGET(ud->builder, name));
+    GtkComboBox *combo = GTK_COMBO_BOX(ghb_builder_widget(name));
     store = GTK_LIST_STORE(gtk_combo_box_get_model (combo));
     gtk_list_store_clear(store);
 
-    gtk_list_store_append(store, &iter);
-    gtk_list_store_set(store, &iter,
-                       0, _("None"),
-                       1, TRUE,
-                       2, "none",
-                       3, (gdouble)0,
-                       -1);
-
     for (ii = 0; ii < count; ii++)
     {
-        if (((encoder & HB_VCODEC_X264_MASK) &&
+        if (((encoder & (HB_VCODEC_X264_MASK | HB_VCODEC_SVT_AV1_MASK)) &&
              !strcmp(tunes[ii], "fastdecode")) ||
             ((encoder & (HB_VCODEC_X264_MASK | HB_VCODEC_X265_MASK)) &&
              !strcmp(tunes[ii], "zerolatency")))
@@ -2463,13 +2581,13 @@ video_profile_opts_set(signal_user_data_t *ud, const gchar *name,
     profiles = hb_video_encoder_get_profiles(encoder);
 
     while (profiles && profiles[count]) count++;
-    GtkWidget *w = GHB_WIDGET(ud->builder, "VideoProfile");
+    GtkWidget *w = ghb_builder_widget("VideoProfile");
     gtk_widget_set_visible(w, count > 0);
-    w = GHB_WIDGET(ud->builder, "VideoProfileLabel");
+    w = ghb_builder_widget("VideoProfileLabel");
     gtk_widget_set_visible(w, count > 0);
     if (count == 0) return;
 
-    GtkComboBox *combo = GTK_COMBO_BOX(GHB_WIDGET(ud->builder, name));
+    GtkComboBox *combo = GTK_COMBO_BOX(ghb_builder_widget(name));
     store = GTK_LIST_STORE(gtk_combo_box_get_model (combo));
     gtk_list_store_clear(store);
 
@@ -2505,13 +2623,13 @@ video_level_opts_set(signal_user_data_t *ud, const gchar *name,
     levels = hb_video_encoder_get_levels(encoder);
 
     while (levels && levels[count]) count++;
-    GtkWidget *w = GHB_WIDGET(ud->builder, "VideoLevel");
+    GtkWidget *w = ghb_builder_widget("VideoLevel");
     gtk_widget_set_visible(w, count > 0);
-    w = GHB_WIDGET(ud->builder, "VideoLevelLabel");
+    w = ghb_builder_widget("VideoLevelLabel");
     gtk_widget_set_visible(w, count > 0);
     if (count <= 0) return;
 
-    GtkComboBox *combo = GTK_COMBO_BOX(GHB_WIDGET(ud->builder, name));
+    GtkComboBox *combo = GTK_COMBO_BOX(ghb_builder_widget(name));
     store = GTK_LIST_STORE(gtk_combo_box_get_model (combo));
     gtk_list_store_clear(store);
 
@@ -2561,7 +2679,7 @@ audio_track_opts_set(signal_user_data_t *ud, const gchar *name,
     gint count = 0;
     gchar *opt;
 
-    GtkComboBox *combo = GTK_COMBO_BOX(GHB_WIDGET(ud->builder, name));
+    GtkComboBox *combo = GTK_COMBO_BOX(ghb_builder_widget(name));
     store = GTK_LIST_STORE(gtk_combo_box_get_model (combo));
     gtk_list_store_clear(store);
     if (title != NULL)
@@ -2585,11 +2703,10 @@ audio_track_opts_set(signal_user_data_t *ud, const gchar *name,
     }
     for (ii = 0; ii < count; ii++)
     {
-        char idx[4];
+        char *idx = g_strdup_printf("%d", ii);
         audio = hb_list_audio_config_item(title->list_audio, ii);
         opt = g_strdup_printf("<small>%d - %s</small>",
                               ii + 1, audio->lang.description);
-        snprintf(idx, 4, "%d", ii);
 
         gtk_list_store_append(store, &iter);
         gtk_list_store_set(store, &iter,
@@ -2599,6 +2716,7 @@ audio_track_opts_set(signal_user_data_t *ud, const gchar *name,
                            3, (gdouble)ii,
                            -1);
         g_free(opt);
+        g_free(idx);
     }
     gtk_combo_box_set_active (combo, 0);
 }
@@ -2614,7 +2732,7 @@ subtitle_track_opts_set(signal_user_data_t *ud, const gchar *name,
     hb_subtitle_t * subtitle;
     gint ii, count = 0;
 
-    GtkComboBox *combo = GTK_COMBO_BOX(GHB_WIDGET(ud->builder, name));
+    GtkComboBox *combo = GTK_COMBO_BOX(ghb_builder_widget(name));
     store = GTK_LIST_STORE(gtk_combo_box_get_model (combo));
     gtk_list_store_clear(store);
 
@@ -2625,11 +2743,9 @@ subtitle_track_opts_set(signal_user_data_t *ud, const gchar *name,
     for (ii = 0; ii < count; ii++)
     {
         gchar *opt;
-        char idx[4];
-
+        char *idx = g_strdup_printf("%d", ii);
         subtitle = hb_list_item(title->list_subtitle, ii);
         opt = g_strdup_printf("%d - %s", ii+1, subtitle->lang);
-        snprintf(idx, 4, "%d", ii);
 
         gtk_list_store_append(store, &iter);
         gtk_list_store_set(store, &iter,
@@ -2639,6 +2755,7 @@ subtitle_track_opts_set(signal_user_data_t *ud, const gchar *name,
                     3, (gdouble)ii,
                     -1);
         g_free(opt);
+        g_free(idx);
     }
     if (count <= 0)
     {
@@ -2655,14 +2772,14 @@ subtitle_track_opts_set(signal_user_data_t *ud, const gchar *name,
 
 // Get title id of feature or longest title
 gint
-ghb_longest_title()
+ghb_longest_title (void)
 {
     hb_title_set_t * title_set;
     const hb_title_t * title;
     gint count = 0, ii, longest = -1;
-    int64_t duration = 0;
+    uint64_t duration = 0;
 
-    g_debug("ghb_longest_title ()\n");
+    ghb_log_func();
     if (h_scan == NULL) return 0;
     title_set = hb_get_title_set( h_scan );
     count = hb_list_count( title_set->list_title );
@@ -2687,7 +2804,7 @@ ghb_get_source_audio_lang(const hb_title_t *title, gint track)
     hb_audio_config_t * audio;
     const gchar *lang = "und";
 
-    g_debug("ghb_lookup_1st_audio_lang ()\n");
+    ghb_log_func();
     if (title == NULL)
         return lang;
     if (hb_list_count( title->list_audio ) <= track)
@@ -2756,7 +2873,7 @@ small_opts_set(signal_user_data_t *ud, const gchar *name,
     gchar *str;
 
     if (name == NULL || opts == NULL) return;
-    GtkComboBox *combo = GTK_COMBO_BOX(GHB_WIDGET(ud->builder, name));
+    GtkComboBox *combo = GTK_COMBO_BOX(ghb_builder_widget(name));
     store = GTK_LIST_STORE(gtk_combo_box_get_model (combo));
     gtk_list_store_clear(store);
     for (ii = 0; ii < opts->count; ii++)
@@ -2784,7 +2901,7 @@ filter_opts_set2(signal_user_data_t *ud, const gchar *name,
     gchar *str;
 
     if (name == NULL) return;
-    GtkComboBox *combo = GTK_COMBO_BOX(GHB_WIDGET(ud->builder, name));
+    GtkComboBox *combo = GTK_COMBO_BOX(ghb_builder_widget(name));
     store = GTK_LIST_STORE(gtk_combo_box_get_model (combo));
     gtk_list_store_clear(store);
     hb_filter_param_t * param;
@@ -2866,7 +2983,7 @@ sharpen_opts_set(signal_user_data_t *ud, const gchar *name,
                                   "sharpen", opts->filter_id);
 }
 
-combo_name_map_t*
+static combo_name_map_t*
 find_combo_map(const gchar *name)
 {
     gint ii;
@@ -2877,17 +2994,6 @@ find_combo_map(const gchar *name)
         {
             return &combo_name_map[ii];
         }
-    }
-    return NULL;
-}
-
-combo_opts_t*
-find_combo_opts(const gchar *name)
-{
-    combo_name_map_t *entry = find_combo_map(name);
-    if (entry != NULL)
-    {
-        return entry->opts;
     }
     return NULL;
 }
@@ -2914,6 +3020,7 @@ generic_opt_get(const char *name, const void *vopts,
             return ghb_double_value_new(val);
         } break;
         case GHB_STRING:
+        default:
         {
             const char *val;
             val = lookup_generic_option(opts, gval);
@@ -2949,6 +3056,7 @@ filter_opt_get2(const char *name, const GhbValue *gval, GhbType type,
             return ghb_int_value_new(val);
         } break;
         case GHB_STRING:
+        default:
         {
             const char *val;
             val = lookup_param_option(param, gval);
@@ -3088,7 +3196,7 @@ ghb_update_ui_combo_box(
         // Clearing a combo box causes a rash of "changed" events, even when
         // the active item is -1 (inactive).  To control things, I'm disabling
         // the event till things are settled down.
-        combo = GTK_COMBO_BOX(GHB_WIDGET(ud->builder, name));
+        combo = GTK_COMBO_BOX(ghb_builder_widget(name));
         signal_id = g_signal_lookup("changed", GTK_TYPE_COMBO_BOX);
         if (signal_id > 0)
         {
@@ -3126,13 +3234,15 @@ ghb_update_ui_combo_box(
 }
 
 static void
-init_ui_combo_boxes(GtkBuilder *builder)
+init_ui_combo_boxes (void)
 {
     gint ii;
+    GtkComboBox *combo;
 
     for (ii = 0; combo_name_map[ii].name != NULL; ii++)
     {
-        init_combo_box(builder, combo_name_map[ii].name);
+        combo = GTK_COMBO_BOX(ghb_builder_widget(combo_name_map[ii].name));
+        ghb_init_combo_box(combo);
     }
 }
 
@@ -3148,6 +3258,8 @@ ghb_chapter_range_get_duration(const hb_title_t *title, gint sc, gint ec)
     duration = title->duration;
 
     count = hb_list_count(title->list_chapter);
+    if (sc < 1)     sc = 1;
+    if (ec < 1)     ec = 1;
     if (sc > count) sc = count;
     if (ec > count) ec = count;
 
@@ -3206,7 +3318,7 @@ ghb_audio_bitrate_opts_filter(
     gdouble ivalue;
     gboolean done = FALSE;
 
-    g_debug("audio_bitrate_opts_filter ()\n");
+    ghb_log_func();
     store = GTK_LIST_STORE(gtk_combo_box_get_model (combo));
     if (gtk_tree_model_get_iter_first (GTK_TREE_MODEL(store), &iter))
     {
@@ -3259,7 +3371,7 @@ audio_bitrate_opts_set(signal_user_data_t *ud, const gchar *name,
     (void)opts; // Silence "unused variable" warning
     (void)data; // Silence "unused variable" warning
 
-    GtkComboBox *combo = GTK_COMBO_BOX(GHB_WIDGET(ud->builder, name));
+    GtkComboBox *combo = GTK_COMBO_BOX(ghb_builder_widget(name));
     ghb_audio_bitrate_opts_set(combo);
 }
 
@@ -3331,29 +3443,26 @@ void
 ghb_combo_init(signal_user_data_t *ud)
 {
     // Set up the list model for the combos
-    init_ui_combo_boxes(ud->builder);
+    init_ui_combo_boxes();
     // Populate all the combos
     ghb_update_ui_combo_box(ud, NULL, NULL, TRUE);
 
-#if GTK_CHECK_VERSION(3, 90, 0)
     GtkWidget          * combo;
     GtkEventController * econ;
 
     // Set key-press handler for subtitle import language combo.
     // Pressing a key warps to the next language that starts with that key.
-    combo = GHB_WIDGET(ud->builder, "ImportLanguage");
+    combo = ghb_builder_widget("ImportLanguage");
     econ  = gtk_event_controller_key_new();
     gtk_widget_add_controller(combo, econ);
     g_signal_connect(econ, "key-pressed",
                      G_CALLBACK(combo_search_key_press_cb), ud);
-#endif
 }
 
 void
 ghb_backend_init(gint debug)
 {
     /* Init libhb */
-    hb_global_init();
     h_scan = hb_init( debug );
     h_queue = hb_init( debug );
     h_live = hb_init( debug );
@@ -3368,7 +3477,7 @@ ghb_log_level_set(int level)
 }
 
 void
-ghb_backend_close()
+ghb_backend_close (void)
 {
     if (h_live != NULL)
         hb_close(&h_live);
@@ -3379,15 +3488,64 @@ ghb_backend_close()
     hb_global_close();
 }
 
-void ghb_backend_scan_stop()
+void ghb_backend_scan_stop (void)
 {
     hb_scan_stop( h_scan );
 }
 
-void
-ghb_backend_scan(const gchar *path, gint titleindex, gint preview_count, uint64_t min_duration)
+hb_list_t *
+ghb_get_excluded_extensions_list (void)
 {
-    hb_scan( h_scan, path, titleindex, preview_count, 1, min_duration );
+    signal_user_data_t *ud = ghb_ud();
+
+    GhbValue *ext_array = ghb_dict_get(ud->prefs, "ExcludedFileExtensions");
+
+    if (!ext_array) return NULL;
+
+    hb_list_t *ext_list = hb_list_init();
+    for (int i = 0; i < hb_value_array_len(ext_array); i++)
+    {
+        hb_value_t *value = hb_value_array_get(ext_array, i);
+        const char *ext = ghb_value_get_string(value);
+        if (ext && ext[0])
+            hb_list_add(ext_list, g_strdup(ext));
+        ghb_log("Excluded extension %s", ext);
+    }
+    return ext_list;
+}
+
+void
+ghb_free_list (hb_list_t *list)
+{
+    for (int i = 0; i < hb_list_count(list); i++)
+    {
+        g_free(hb_list_item(list, i));
+    }
+    hb_list_close(&list);
+}
+
+hb_list_t *
+get_path_list(GListModel *files)
+{
+    g_return_val_if_fail(g_list_model_get_item_type(files) == G_TYPE_FILE, NULL);
+    hb_list_t *path_list = hb_list_init();
+    for (guint i = 0; i < g_list_model_get_n_items(files); i++)
+    {
+        g_autoptr(GFile) file = g_list_model_get_item(files, i);
+        hb_list_add(path_list, g_file_get_path(file));
+    }
+    return path_list;
+}
+
+void
+ghb_backend_scan_list (GListModel *files, int titleindex, int preview_count, uint64_t min_duration, uint64_t max_duration, gboolean keep_duplicate_titles)
+{
+    hb_list_t *path_list = get_path_list(files);
+    hb_list_t *extensions = ghb_get_excluded_extensions_list();
+    hb_scan(h_scan, path_list, titleindex, preview_count, 1, min_duration, max_duration,
+                 0, 0, extensions, 0, keep_duplicate_titles);
+    ghb_free_list(path_list);
+    ghb_free_list(extensions);
     hb_status.scan.state |= GHB_STATE_SCANNING;
     // initialize count and cur to something that won't cause FPE
     // when computing progress
@@ -3399,21 +3557,33 @@ ghb_backend_scan(const gchar *path, gint titleindex, gint preview_count, uint64_
 }
 
 void
-ghb_backend_queue_scan(const gchar *path, gint titlenum)
+ghb_backend_scan (const char *path, int titleindex, int preview_count, uint64_t min_duration, uint64_t max_duration, gboolean keep_duplicate_titles)
 {
-    g_debug("ghb_backend_queue_scan()");
-    hb_scan( h_queue, path, titlenum, -1, 0, 0 );
-    hb_status.queue.state |= GHB_STATE_SCANNING;
+    hb_list_t *path_list = hb_list_init();
+    hb_list_add(path_list, (void *)path);
+    hb_list_t *extensions = ghb_get_excluded_extensions_list();
+    hb_scan(h_scan, path_list, titleindex, preview_count, 1, min_duration, max_duration,
+                 0, 0, extensions, 0, keep_duplicate_titles);
+    hb_list_close(&path_list);
+    ghb_free_list(extensions);
+    hb_status.scan.state |= GHB_STATE_SCANNING;
+    // initialize count and cur to something that won't cause FPE
+    // when computing progress
+    hb_status.scan.title_count = 1;
+    hb_status.scan.title_cur = 0;
+    hb_status.scan.preview_count = 1;
+    hb_status.scan.preview_cur = 0;
+    hb_status.scan.progress = 0;
 }
 
 gint
-ghb_get_scan_state()
+ghb_get_scan_state (void)
 {
     return hb_status.scan.state;
 }
 
 gint
-ghb_get_queue_state()
+ghb_get_queue_state (void)
 {
     return hb_status.queue.state;
 }
@@ -3557,7 +3727,7 @@ update_status(hb_state_t *state, ghb_instance_status_t *status)
 }
 
 void
-ghb_track_status()
+ghb_track_status (void)
 {
     hb_state_t state;
 
@@ -3593,7 +3763,7 @@ ghb_get_subtitle_info(const hb_title_t *title, gint track)
 }
 
 hb_list_t *
-ghb_get_title_list()
+ghb_get_title_list (void)
 {
     if (h_scan == NULL) return NULL;
     return hb_get_titles( h_scan );
@@ -3602,19 +3772,19 @@ ghb_get_title_list()
 gboolean
 ghb_audio_is_passthru(gint acodec)
 {
-    g_debug("ghb_audio_is_passthru () \n");
+    ghb_log_func();
     return (acodec & HB_ACODEC_PASS_FLAG) != 0;
 }
 
 gboolean
 ghb_audio_can_passthru(gint acodec)
 {
-    g_debug("ghb_audio_can_passthru () \n");
+    ghb_log_func();
     return (acodec & HB_ACODEC_PASS_MASK) != 0;
 }
 
 gint
-ghb_get_default_acodec()
+ghb_get_default_acodec (void)
 {
     return HB_ACODEC_FFAAC;
 }
@@ -3622,302 +3792,329 @@ ghb_get_default_acodec()
 void
 ghb_picture_settings_deps(signal_user_data_t *ud)
 {
-    gboolean autoscale, keep_aspect, enable_keep_aspect;
+    gboolean autoscale, keep_aspect, custom_resolution_limit;
     gboolean enable_scale_width, enable_scale_height;
     gboolean enable_disp_width, enable_disp_height, enable_par;
+    gboolean custom_crop, custom_pad;
+    const gchar * resolution_limit, * crop_mode, * pad_mode;
     gint pic_par;
     GtkWidget *widget;
 
-    pic_par = ghb_settings_combo_int(ud->settings, "PicturePAR");
-    enable_keep_aspect = (pic_par != HB_ANAMORPHIC_STRICT &&
-                          pic_par != HB_ANAMORPHIC_AUTO   &&
-                          pic_par != HB_ANAMORPHIC_LOOSE);
-    keep_aspect = ghb_dict_get_bool(ud->settings, "PictureKeepRatio");
-    autoscale = ghb_dict_get_bool(ud->settings, "autoscale");
+    pic_par          = ghb_settings_combo_int(ud->settings, "PicturePAR");
+    keep_aspect      = ghb_dict_get_bool(ud->settings, "PictureKeepRatio");
+    autoscale        = ghb_dict_get_bool(ud->settings, "PictureUseMaximumSize");
+    resolution_limit = ghb_dict_get_string(ud->settings, "resolution_limit");
+    crop_mode        = ghb_dict_get_string(ud->settings, "crop_mode");
+    pad_mode         = ghb_dict_get_string(ud->settings, "PicturePadMode");
 
-    enable_scale_width = enable_scale_height =
-                         !autoscale && (pic_par != HB_ANAMORPHIC_STRICT);
-    enable_disp_width = (pic_par == HB_ANAMORPHIC_CUSTOM) && !keep_aspect;
-    enable_par = (pic_par == HB_ANAMORPHIC_CUSTOM) && !keep_aspect;
-    enable_disp_height = FALSE;
+    enable_scale_width      = enable_scale_height = !autoscale;
+    enable_disp_width       = !keep_aspect;
+    enable_par              = (pic_par == HB_ANAMORPHIC_CUSTOM);
+    enable_disp_height      = FALSE;
+    custom_resolution_limit = !strcmp(resolution_limit, "custom");
+    custom_crop             = !strcmp(crop_mode, "custom");
+    custom_pad              = !strcmp(pad_mode, "custom");
 
-    widget = GHB_WIDGET(ud->builder, "PictureModulus");
-    gtk_widget_set_sensitive(widget, pic_par != HB_ANAMORPHIC_STRICT);
-    widget = GHB_WIDGET(ud->builder, "PictureLooseCrop");
-    gtk_widget_set_sensitive(widget, pic_par != HB_ANAMORPHIC_STRICT);
-    widget = GHB_WIDGET(ud->builder, "scale_width");
+    widget = ghb_builder_widget("scale_width");
     gtk_widget_set_sensitive(widget, enable_scale_width);
-    widget = GHB_WIDGET(ud->builder, "scale_height");
+    widget = ghb_builder_widget("scale_height");
     gtk_widget_set_sensitive(widget, enable_scale_height);
-    widget = GHB_WIDGET(ud->builder, "PictureDisplayWidth");
+
+    widget = ghb_builder_widget("PictureDARWidth");
     gtk_widget_set_sensitive(widget, enable_disp_width);
-    widget = GHB_WIDGET(ud->builder, "PictureDisplayHeight");
+    widget = ghb_builder_widget("DisplayHeight");
     gtk_widget_set_sensitive(widget, enable_disp_height);
-    widget = GHB_WIDGET(ud->builder, "PicturePARWidth");
-    gtk_widget_set_sensitive(widget, enable_par);
-    widget = GHB_WIDGET(ud->builder, "PicturePARHeight");
-    gtk_widget_set_sensitive(widget, enable_par);
-    widget = GHB_WIDGET(ud->builder, "PictureKeepRatio");
-    gtk_widget_set_sensitive(widget, enable_keep_aspect);
-    widget = GHB_WIDGET(ud->builder, "autoscale");
-    gtk_widget_set_sensitive(widget, pic_par != HB_ANAMORPHIC_STRICT);
-}
 
-void
-ghb_limit_rational( gint *num, gint *den, gint limit )
-{
-    if (*num < limit && *den < limit)
-        return;
+    widget = ghb_builder_widget("PicturePARWidth");
+    gtk_widget_set_sensitive(widget, enable_par);
+    widget = ghb_builder_widget("PicturePARHeight");
+    gtk_widget_set_sensitive(widget, enable_par);
 
-    if (*num > *den)
+    widget = ghb_builder_widget("PictureWidth");
+    gtk_widget_set_visible(widget, custom_resolution_limit);
+    widget = ghb_builder_widget("PictureHeight");
+    gtk_widget_set_visible(widget, custom_resolution_limit);
+    widget = ghb_builder_widget("maximum_size_label");
+    gtk_widget_set_visible(widget, custom_resolution_limit);
+    widget = ghb_builder_widget("maximum_size_x_label");
+    gtk_widget_set_visible(widget, custom_resolution_limit);
+
+    widget = ghb_builder_widget("PictureTopCrop");
+    gtk_widget_set_sensitive(widget, custom_crop);
+    widget = ghb_builder_widget("PictureBottomCrop");
+    gtk_widget_set_sensitive(widget, custom_crop);
+    widget = ghb_builder_widget("PictureLeftCrop");
+    gtk_widget_set_sensitive(widget, custom_crop);
+    widget = ghb_builder_widget("PictureRightCrop");
+    gtk_widget_set_sensitive(widget, custom_crop);
+
+    widget = ghb_builder_widget("PicturePadTop");
+    gtk_widget_set_sensitive(widget, custom_pad);
+    widget = ghb_builder_widget("PicturePadBottom");
+    gtk_widget_set_sensitive(widget, custom_pad);
+    widget = ghb_builder_widget("PicturePadLeft");
+    gtk_widget_set_sensitive(widget, custom_pad);
+    widget = ghb_builder_widget("PicturePadRight");
+    gtk_widget_set_sensitive(widget, custom_pad);
+
+    widget = ghb_builder_widget("display_size_lock_image");
+    if (keep_aspect)
     {
-        gdouble factor = (double)limit / *num;
-        *num = limit;
-        *den = factor * *den;
+        gtk_image_set_from_icon_name(GTK_IMAGE(widget), "emblem-readonly");
     }
     else
     {
-        gdouble factor = (double)limit / *den;
-        *den = limit;
-        *num = factor * *num;
+        gtk_image_set_from_icon_name(GTK_IMAGE(widget), "edit-clear");
     }
 }
 
-void
-ghb_apply_crop(GhbValue *settings, const hb_title_t * title)
+static void
+apply_pad (GhbValue *settings,
+           const hb_geometry_settings_t * geo,
+                 hb_geometry_t          * result)
 {
-    gboolean autocrop, loosecrop;
+    gboolean fillwidth, fillheight;
+    gint pad[4] = {0,};
+
+    const gchar * pad_mode;
+
+    pad_mode   = ghb_dict_get_string(settings, "PicturePadMode");
+    fillwidth  = fillheight  = !strcmp(pad_mode, "fill");
+    fillheight = fillheight || !strcmp(pad_mode, "letterbox");
+    fillwidth  = fillwidth  || !strcmp(pad_mode, "pillarbox");
+
+    if (!strcmp(pad_mode, "custom"))
+    {
+        pad[0] = ghb_dict_get_int(settings, "PicturePadTop");
+        pad[1] = ghb_dict_get_int(settings, "PicturePadBottom");
+        pad[2] = ghb_dict_get_int(settings, "PicturePadLeft");
+        pad[3] = ghb_dict_get_int(settings, "PicturePadRight");
+    }
+
+    if (fillheight && geo->maxHeight > 0)
+    {
+        pad[0] = (geo->maxHeight - result->height) / 2;
+        pad[1] =  geo->maxHeight - result->height - pad[0];
+    }
+    if (fillwidth && geo->maxWidth > 0)
+    {
+        pad[2] = (geo->maxWidth - result->width) / 2;
+        pad[3] =  geo->maxWidth - result->width - pad[2];
+    }
+
+    pad[0] = MOD_DOWN(pad[0], 2);
+    pad[1] = MOD_DOWN(pad[1], 2);
+    pad[2] = MOD_DOWN(pad[2], 2);
+    pad[3] = MOD_DOWN(pad[3], 2);
+    ghb_dict_set_int(settings, "PicturePadTop",    pad[0]);
+    ghb_dict_set_int(settings, "PicturePadBottom", pad[1]);
+    ghb_dict_set_int(settings, "PicturePadLeft",   pad[2]);
+    ghb_dict_set_int(settings, "PicturePadRight",  pad[3]);
+
+    result->width  += pad[2] + pad[3];
+    result->height += pad[0] + pad[1];
+}
+
+void
+ghb_apply_crop(GhbValue *settings, const hb_geometry_crop_t * geo, const hb_title_t * title)
+{
+    gboolean autocrop, conservativecrop, customcrop;
     gint crop[4] = {0,};
 
-    autocrop = ghb_dict_get_bool(settings, "PictureAutoCrop");
-    // "PictureLooseCrop" is a flag that says we prefer to crop extra to
-    // satisfy alignment constraints rather than scaling to satisfy them.
-    loosecrop = ghb_dict_get_bool(settings, "PictureLooseCrop");
+    const gchar * crop_mode;
 
-    if (autocrop)
+    crop_mode  = ghb_dict_get_string(settings, "crop_mode");
+    autocrop         = !strcmp(crop_mode, "auto");
+    conservativecrop = !strcmp(crop_mode, "conservative");
+    customcrop       = !strcmp(crop_mode, "custom");
+
+    if (title && autocrop)
     {
         crop[0] = title->crop[0];
         crop[1] = title->crop[1];
         crop[2] = title->crop[2];
         crop[3] = title->crop[3];
     }
-    else
+    else if (title && conservativecrop)
+    {
+        crop[0] = title->loose_crop[0];
+        crop[1] = title->loose_crop[1];
+        crop[2] = title->loose_crop[2];
+        crop[3] = title->loose_crop[3];
+    }
+    else if (customcrop)
     {
         crop[0] = ghb_dict_get_int(settings, "PictureTopCrop");
         crop[1] = ghb_dict_get_int(settings, "PictureBottomCrop");
         crop[2] = ghb_dict_get_int(settings, "PictureLeftCrop");
         crop[3] = ghb_dict_get_int(settings, "PictureRightCrop");
     }
-    if (loosecrop)
-    {
-        gint need1, need2;
-        gint crop_width, crop_height, width, height;
-        gint mod;
 
-        mod = ghb_settings_combo_int(settings, "PictureModulus");
-        if (mod <= 0)
-            mod = 16;
-
-        // Adjust the cropping to accomplish the desired width and height
-        crop_width = title->geometry.width - crop[2] - crop[3];
-        crop_height = title->geometry.height - crop[0] - crop[1];
-        width = MOD_DOWN(crop_width, mod);
-        height = MOD_DOWN(crop_height, mod);
-
-        need1 = EVEN((crop_height - height) / 2);
-        need2 = crop_height - height - need1;
-        crop[0] += need1;
-        crop[1] += need2;
-        need1 = EVEN((crop_width - width) / 2);
-        need2 = crop_width - width - need1;
-        crop[2] += need1;
-        crop[3] += need2;
-    }
     // Prevent crop from creating too small an image
-    if (title->geometry.height - crop[0] -crop[1] < 16)
+    if (geo->geometry.height - crop[0] -crop[1] < 16)
     {
-        crop[0] = title->geometry.height - crop[1] - 16;
+        crop[0] = geo->geometry.height - crop[1] - 16;
         if (crop[0] < 0)
         {
             crop[1] += crop[0];
-            crop[0] = 0;
+            crop[0]  = 0;
         }
     }
-    if (title->geometry.width - crop[2] - crop[3] < 16)
+    if (geo->geometry.width - crop[2] - crop[3] < 16)
     {
-        crop[2] = title->geometry.width - crop[3] - 16;
+        crop[2] = geo->geometry.width - crop[3] - 16;
         if (crop[2] < 0)
         {
             crop[3] += crop[2];
-            crop[2] = 0;
+            crop[2]  = 0;
         }
     }
-    ghb_dict_set_int(settings, "PictureTopCrop", crop[0]);
+    crop[0] = MOD_DOWN(crop[0], 2);
+    crop[1] = MOD_DOWN(crop[1], 2);
+    crop[2] = MOD_DOWN(crop[2], 2);
+    crop[3] = MOD_DOWN(crop[3], 2);
+    ghb_dict_set_int(settings, "PictureTopCrop",    crop[0]);
     ghb_dict_set_int(settings, "PictureBottomCrop", crop[1]);
-    ghb_dict_set_int(settings, "PictureLeftCrop", crop[2]);
-    ghb_dict_set_int(settings, "PictureRightCrop", crop[3]);
+    ghb_dict_set_int(settings, "PictureLeftCrop",   crop[2]);
+    ghb_dict_set_int(settings, "PictureRightCrop",  crop[3]);
 }
 
 void
-ghb_set_scale_settings(GhbValue *settings, gint mode)
+ghb_set_scale_settings(signal_user_data_t * ud, GhbValue *settings, gint mode)
 {
     gboolean keep_aspect;
-    gint pic_par;
-    gboolean autoscale;
-    gint crop[4] = {0,};
-    gint width, height;
-    gint crop_width, crop_height;
-    gboolean keep_width = (mode & GHB_PIC_KEEP_WIDTH);
-    gboolean keep_height = (mode & GHB_PIC_KEEP_HEIGHT);
-    gint mod;
-    gint max_width = 0;
-    gint max_height = 0;
-
-    pic_par = ghb_settings_combo_int(settings, "PicturePAR");
-    if (pic_par == HB_ANAMORPHIC_STRICT)
-    {
-        ghb_dict_set_bool(settings, "autoscale", TRUE);
-        ghb_dict_set_int(settings, "PictureModulus", 2);
-        ghb_dict_set_bool(settings, "PictureLooseCrop", TRUE);
-    }
-    if (pic_par == HB_ANAMORPHIC_STRICT ||
-        pic_par == HB_ANAMORPHIC_AUTO   ||
-        pic_par == HB_ANAMORPHIC_LOOSE)
-    {
-        ghb_dict_set_bool(settings, "PictureKeepRatio", TRUE);
-    }
+    gboolean autoscale, upscale;
+    gboolean keep_width         = (mode & GHB_PIC_KEEP_WIDTH);
+    gboolean keep_height        = (mode & GHB_PIC_KEEP_HEIGHT);
+    gboolean keep_display_width = (mode & GHB_PIC_KEEP_DISPLAY_WIDTH);
+    const gchar * pad_mode;
 
     int title_id, titleindex;
     const hb_title_t * title;
+    int angle, hflip;
+
+    hb_geometry_crop_t     srcGeo;
+    hb_geometry_t          resultGeo;
+    hb_geometry_settings_t uiGeo;
 
     title_id = ghb_dict_get_int(settings, "title");
     title = ghb_lookup_title(title_id, &titleindex);
-    if (title == NULL) return;
 
-    hb_geometry_t srcGeo, resultGeo;
-    hb_geometry_settings_t uiGeo;
-
-    srcGeo.width   = title->geometry.width;
-    srcGeo.height  = title->geometry.height;
-    srcGeo.par     = title->geometry.par;
-
-    // First configure widgets
-    mod = ghb_settings_combo_int(settings, "PictureModulus");
-    if (mod <= 0)
-        mod = 16;
-    keep_aspect = ghb_dict_get_bool(settings, "PictureKeepRatio");
-    autoscale = ghb_dict_get_bool(settings, "autoscale");
-    // Align dimensions to either 16 or 2 pixels
-    // The scaler crashes if the dimensions are not divisible by 2
-    // x264 also will not accept dims that are not multiple of 2
-    if (autoscale)
+    if (title != NULL)
     {
-        keep_width = FALSE;
-        keep_height = FALSE;
-    }
-
-    ghb_apply_crop(settings, title);
-    crop[0] = ghb_dict_get_int(settings, "PictureTopCrop");
-    crop[1] = ghb_dict_get_int(settings, "PictureBottomCrop");
-    crop[2] = ghb_dict_get_int(settings, "PictureLeftCrop");
-    crop[3] = ghb_dict_get_int(settings, "PictureRightCrop");
-    uiGeo.crop[0] = crop[0];
-    uiGeo.crop[1] = crop[1];
-    uiGeo.crop[2] = crop[2];
-    uiGeo.crop[3] = crop[3];
-
-    crop_width = title->geometry.width - crop[2] - crop[3];
-    crop_height = title->geometry.height - crop[0] - crop[1];
-    if (autoscale)
-    {
-        width = crop_width;
-        height = crop_height;
+        srcGeo.geometry = title->geometry;
+        memcpy(srcGeo.crop, &title->crop, 4 * sizeof(int));
     }
     else
     {
-        width = ghb_dict_get_int(settings, "scale_width");
-        height = ghb_dict_get_int(settings, "scale_height");
-        if (mode & GHB_PIC_USE_MAX)
+        // Defaults so that the Dimensions tab does something reasonable
+        // when there is no title
+        memset(&srcGeo, 0, sizeof(srcGeo));
+        srcGeo.geometry.width  = ghb_dict_get_int(settings, "PictureWidth");
+        srcGeo.geometry.height = ghb_dict_get_int(settings, "PictureHeight");
+        srcGeo.geometry.par.num = 1;
+        srcGeo.geometry.par.den = 1;
+        if (srcGeo.geometry.width == 0 || srcGeo.geometry.height == 0)
         {
-            max_width = MOD_DOWN(
-                ghb_dict_get_int(settings, "PictureWidth"), mod);
-            max_height = MOD_DOWN(
-                ghb_dict_get_int(settings, "PictureHeight"), mod);
+            srcGeo.geometry.width  = 1920;
+            srcGeo.geometry.height = 1080;
         }
     }
-    g_debug("max_width %d, max_height %d\n", max_width, max_height);
 
-    if (width < 16)
-        width = 16;
-    if (height < 16)
-        height = 16;
+    // Rotate title dimensions so that they align with the current
+    // orientation of dimensions tab settings
+    angle = ghb_dict_get_int(settings, "rotate");
+    hflip = ghb_dict_get_int(settings, "hflip");
+    hb_rotate_geometry(&srcGeo, &srcGeo, angle, hflip);
 
-    width = MOD_ROUND(width, mod);
-    height = MOD_ROUND(height, mod);
+    // Apply crop mode to current settings and sanitize crop values
+    ghb_apply_crop(settings, &srcGeo, title);
 
-    uiGeo.mode = pic_par;
-    uiGeo.keep = 0;
+    memset(&uiGeo, 0, sizeof(uiGeo));
+
+    pad_mode    = ghb_dict_get_string(ud->settings, "PicturePadMode");
+    autoscale   = ghb_dict_get_bool(settings, "PictureUseMaximumSize");
+    upscale     = ghb_dict_get_bool(settings, "PictureAllowUpscaling");
+    keep_aspect = ghb_dict_get_bool(settings, "PictureKeepRatio");
+
+    if (keep_display_width)
+        uiGeo.keep |= HB_KEEP_DISPLAY_WIDTH;
     if (keep_width)
         uiGeo.keep |= HB_KEEP_WIDTH;
     if (keep_height)
         uiGeo.keep |= HB_KEEP_HEIGHT;
     if (keep_aspect)
         uiGeo.keep |= HB_KEEP_DISPLAY_ASPECT;
-    uiGeo.itu_par = 0;
-    uiGeo.modulus = mod;
-    uiGeo.geometry.width = width;
-    uiGeo.geometry.height = height;
-    uiGeo.geometry.par = title->geometry.par;
-    uiGeo.maxWidth = max_width;
-    uiGeo.maxHeight = max_height;
-    if (pic_par != HB_ANAMORPHIC_NONE)
-    {
-        if (pic_par == HB_ANAMORPHIC_CUSTOM && !keep_aspect)
-        {
-            if (mode & GHB_PIC_KEEP_PAR)
-            {
-                uiGeo.geometry.par.num =
-                    ghb_dict_get_int(settings, "PicturePARWidth");
-                uiGeo.geometry.par.den =
-                    ghb_dict_get_int(settings, "PicturePARHeight");
-            }
-            else if (mode & (GHB_PIC_KEEP_DISPLAY_HEIGHT |
-                             GHB_PIC_KEEP_DISPLAY_WIDTH))
-            {
-                uiGeo.geometry.par.num =
-                        ghb_dict_get_int(settings, "PictureDisplayWidth");
-                uiGeo.geometry.par.den = width;
-                hb_reduce(&uiGeo.geometry.par.num, &uiGeo.geometry.par.den,
-                           uiGeo.geometry.par.num,  uiGeo.geometry.par.den);
-            }
-        }
-        else
-        {
-            uiGeo.keep |= HB_KEEP_DISPLAY_ASPECT;
-        }
-    }
-    // hb_set_anamorphic_size will adjust par, dar, and width/height
-    // to conform to job parameters that have been set, including
-    // maxWidth and maxHeight
-    hb_set_anamorphic_size2(&srcGeo, &uiGeo, &resultGeo);
+    if (!strcmp(pad_mode, "custom"))
+        uiGeo.keep |= HB_KEEP_PAD;
+
+    if (upscale)
+        uiGeo.flags |= HB_GEO_SCALE_UP;
+    if (autoscale)
+        uiGeo.flags |= HB_GEO_SCALE_BEST;
+
+    uiGeo.mode             = ghb_settings_combo_int(settings, "PicturePAR");
+    uiGeo.modulus          = ghb_dict_get_int(settings, "PictureModulus");
+    uiGeo.geometry.width   = ghb_dict_get_int(settings, "scale_width");
+    uiGeo.geometry.height  = ghb_dict_get_int(settings, "scale_height");
+    uiGeo.maxWidth         = ghb_dict_get_int(settings, "PictureWidth");
+    uiGeo.maxHeight        = ghb_dict_get_int(settings, "PictureHeight");
+    uiGeo.geometry.par.num = ghb_dict_get_int(settings, "PicturePARWidth");
+    uiGeo.geometry.par.den = ghb_dict_get_int(settings, "PicturePARHeight");
+    uiGeo.displayWidth     = ghb_dict_get_int(settings, "PictureDARWidth");
+    uiGeo.displayHeight    = ghb_dict_get_int(settings, "DisplayHeight");
+
+    uiGeo.pad[0] = ghb_dict_get_int(settings, "PicturePadTop");
+    uiGeo.pad[1] = ghb_dict_get_int(settings, "PicturePadBottom");
+    uiGeo.pad[2] = ghb_dict_get_int(settings, "PicturePadLeft");
+    uiGeo.pad[3] = ghb_dict_get_int(settings, "PicturePadRight");
+
+    uiGeo.crop[0] = ghb_dict_get_int(settings, "PictureTopCrop");
+    uiGeo.crop[1] = ghb_dict_get_int(settings, "PictureBottomCrop");
+    uiGeo.crop[2] = ghb_dict_get_int(settings, "PictureLeftCrop");
+    uiGeo.crop[3] = ghb_dict_get_int(settings, "PictureRightCrop");
+
+    // hb_set_anamorphic_size2 will adjust par, dar, and width/height
+    // and enforce resolution limits
+    hb_set_anamorphic_size2(&srcGeo.geometry, &uiGeo, &resultGeo);
 
     ghb_dict_set_int(settings, "scale_width", resultGeo.width);
     ghb_dict_set_int(settings, "scale_height", resultGeo.height);
+
+    ghb_dict_set_int(settings, "PicturePARWidth", resultGeo.par.num);
+    ghb_dict_set_int(settings, "PicturePARHeight", resultGeo.par.den);
+
+    // Update Job PAR
+    GhbValue *par = ghb_get_job_par_settings(settings);
+    ghb_dict_set_int(par, "Num", resultGeo.par.num);
+    ghb_dict_set_int(par, "Den", resultGeo.par.den);
+
+    uiGeo.maxWidth  = ghb_dict_get_int(settings, "PictureWidth");
+    uiGeo.maxHeight = ghb_dict_get_int(settings, "PictureHeight");
+    apply_pad(settings, &uiGeo, &resultGeo);
 
     gint disp_width;
 
     disp_width = ((gdouble)resultGeo.par.num / resultGeo.par.den) *
                  resultGeo.width + 0.5;
 
-    ghb_dict_set_int(settings, "PicturePARWidth", resultGeo.par.num);
-    ghb_dict_set_int(settings, "PicturePARHeight", resultGeo.par.den);
-    ghb_dict_set_int(settings, "PictureDisplayWidth", disp_width);
-    ghb_dict_set_int(settings, "PictureDisplayHeight", resultGeo.height);
+    ghb_dict_set_int(settings, "PictureDARWidth", disp_width);
+    ghb_dict_set_int(settings, "DisplayHeight", resultGeo.height);
 
-    // Update Job PAR
-    GhbValue *par = ghb_get_job_par_settings(settings);
-    ghb_dict_set_int(par, "Num", resultGeo.par.num);
-    ghb_dict_set_int(par, "Den", resultGeo.par.den);
+    char * storage_size;
+    storage_size = hb_strdup_printf("%d x %d",
+                                    resultGeo.width, resultGeo.height);
+    ghb_ui_update("final_storage_size", ghb_string_value(storage_size));
+    g_free(storage_size);
+
+    if (ghb_check_name_template(ud, "{width}") ||
+        ghb_check_name_template(ud, "{height}"))
+        ghb_set_destination(ud);
+
+    char * aspect;
+    aspect = ghb_get_display_aspect_string(disp_width, resultGeo.height);
+    ghb_ui_update("final_aspect_ratio", ghb_string_value(aspect));
+    g_free(aspect);
 }
 
 char *
@@ -3926,151 +4123,80 @@ ghb_get_display_aspect_string(double disp_width, double disp_height)
     gchar *str;
 
     gint iaspect = disp_width * 9 / disp_height;
-    if (disp_width > 2 * disp_height)
+    if (disp_width / disp_height > 1.9)
     {
+        // x.x:1
         str = g_strdup_printf("%.2f:1", disp_width / disp_height);
     }
-    else if (iaspect <= 16 && iaspect >= 15)
+    else if (iaspect >= 15)
     {
+        // x.x:9
         str = g_strdup_printf("%.4g:9", disp_width * 9 / disp_height);
     }
-    else if (iaspect <= 12 && iaspect >= 11)
+    else if (iaspect >= 9)
     {
+        // x.x:3
         str = g_strdup_printf("%.4g:3", disp_width * 3 / disp_height);
     }
     else
     {
-        gint dar_width, dar_height;
-        hb_reduce(&dar_width, &dar_height, disp_width, disp_height);
-        str = g_strdup_printf("%d:%d", dar_width, dar_height);
+        // 1:x.x
+        str = g_strdup_printf("1:%.2f", disp_height / disp_width);
     }
     return str;
 }
 
-void
-ghb_update_display_aspect_label(signal_user_data_t *ud)
-{
-    gint width, disp_height;
-    gint par_num, par_den;
-    double disp_width;
-    gchar *str;
+static gboolean scale_busy = FALSE;
 
-    width  = ghb_dict_get_int(ud->settings, "scale_width");
-    disp_height = ghb_dict_get_int(ud->settings, "scale_height");
-    par_num = ghb_dict_get_int(ud->settings, "PicturePARWidth");
-    par_den = ghb_dict_get_int(ud->settings, "PicturePARHeight");
-    disp_width = (double)width * par_num / par_den;
-    str        = ghb_get_display_aspect_string(disp_width, disp_height);
-    ghb_ui_update(ud, "display_aspect", ghb_string_value(str));
-    g_free(str);
+void
+ghb_set_scale_busy (gboolean busy)
+{
+    scale_busy = busy;
 }
 
 void
 ghb_set_scale(signal_user_data_t *ud, gint mode)
 {
-    if (ud->scale_busy) return;
-    ud->scale_busy = TRUE;
+    if (scale_busy) return;
+    ghb_set_scale_busy(TRUE);
 
-    ghb_set_scale_settings(ud->settings, mode);
+    ghb_set_scale_settings(ud, ud->settings, mode);
     ghb_update_summary_info(ud);
     ghb_picture_settings_deps(ud);
 
     // Step needs to be at least 2 because odd widths cause scaler crash
     // subsampled chroma requires even crop values.
     GtkWidget *widget;
-    int mod = ghb_settings_combo_int(ud->settings, "PictureModulus");
-    widget = GHB_WIDGET (ud->builder, "scale_width");
+    int mod = ghb_dict_get_int(ud->settings, "PictureModulus");
+    widget = ghb_builder_widget("scale_width");
     gtk_spin_button_set_increments (GTK_SPIN_BUTTON(widget), mod, 16);
-    widget = GHB_WIDGET (ud->builder, "scale_height");
+    widget = ghb_builder_widget("scale_height");
     gtk_spin_button_set_increments (GTK_SPIN_BUTTON(widget), mod, 16);
 
-    // "PictureLooseCrop" is a flag that says we prefer to crop extra to
-    // satisfy alignment constraints rather than scaling to satisfy them.
-    gboolean loosecrop = ghb_dict_get_bool(ud->settings, "PictureLooseCrop");
-    if (loosecrop)
-    {
-        widget = GHB_WIDGET (ud->builder, "PictureTopCrop");
-        gtk_spin_button_set_increments (GTK_SPIN_BUTTON(widget), mod, 16);
-        widget = GHB_WIDGET (ud->builder, "PictureBottomCrop");
-        gtk_spin_button_set_increments (GTK_SPIN_BUTTON(widget), mod, 16);
-        widget = GHB_WIDGET (ud->builder, "PictureLeftCrop");
-        gtk_spin_button_set_increments (GTK_SPIN_BUTTON(widget), mod, 16);
-        widget = GHB_WIDGET (ud->builder, "PictureRightCrop");
-        gtk_spin_button_set_increments (GTK_SPIN_BUTTON(widget), mod, 16);
-    }
-    else
-    {
-        widget = GHB_WIDGET (ud->builder, "PictureTopCrop");
-        gtk_spin_button_set_increments (GTK_SPIN_BUTTON(widget), 2, 16);
-        widget = GHB_WIDGET (ud->builder, "PictureBottomCrop");
-        gtk_spin_button_set_increments (GTK_SPIN_BUTTON(widget), 2, 16);
-        widget = GHB_WIDGET (ud->builder, "PictureLeftCrop");
-        gtk_spin_button_set_increments (GTK_SPIN_BUTTON(widget), 2, 16);
-        widget = GHB_WIDGET (ud->builder, "PictureRightCrop");
-        gtk_spin_button_set_increments (GTK_SPIN_BUTTON(widget), 2, 16);
-    }
+    ghb_ui_update_from_settings("PictureUseMaximumSize", ud->settings);
+    ghb_ui_update_from_settings("PictureKeepRatio", ud->settings);
 
-    ghb_ui_update_from_settings(ud, "autoscale", ud->settings);
-    ghb_ui_update_from_settings(ud, "PictureModulus", ud->settings);
-    ghb_ui_update_from_settings(ud, "PictureLooseCrop", ud->settings);
-    ghb_ui_update_from_settings(ud, "PictureKeepRatio", ud->settings);
+    ghb_ui_update_from_settings("PictureTopCrop", ud->settings);
+    ghb_ui_update_from_settings("PictureBottomCrop", ud->settings);
+    ghb_ui_update_from_settings("PictureLeftCrop", ud->settings);
+    ghb_ui_update_from_settings("PictureRightCrop", ud->settings);
 
-    ghb_ui_update_from_settings(ud, "PictureTopCrop", ud->settings);
-    ghb_ui_update_from_settings(ud, "PictureBottomCrop", ud->settings);
-    ghb_ui_update_from_settings(ud, "PictureLeftCrop", ud->settings);
-    ghb_ui_update_from_settings(ud, "PictureRightCrop", ud->settings);
+    ghb_ui_update_from_settings("scale_width", ud->settings);
+    ghb_ui_update_from_settings("scale_height", ud->settings);
+    ghb_ui_update_from_settings("PictureWidth", ud->settings);
+    ghb_ui_update_from_settings("PictureHeight", ud->settings);
 
-    ghb_ui_update_from_settings(ud, "scale_width", ud->settings);
-    ghb_ui_update_from_settings(ud, "scale_height", ud->settings);
+    ghb_ui_update_from_settings("PicturePARWidth", ud->settings);
+    ghb_ui_update_from_settings("PicturePARHeight", ud->settings);
 
-    ghb_ui_update_from_settings(ud, "PicturePARWidth", ud->settings);
-    ghb_ui_update_from_settings(ud, "PicturePARHeight", ud->settings);
-    ghb_ui_update_from_settings(ud, "PictureDisplayWidth", ud->settings);
-    ghb_ui_update_from_settings(ud, "PictureDisplayHeight", ud->settings);
-    ghb_update_display_aspect_label(ud);
-    ud->scale_busy = FALSE;
-}
+    ghb_ui_update_from_settings("PicturePadTop", ud->settings);
+    ghb_ui_update_from_settings("PicturePadBottom", ud->settings);
+    ghb_ui_update_from_settings("PicturePadLeft", ud->settings);
+    ghb_ui_update_from_settings("PicturePadRight", ud->settings);
 
-static void
-get_preview_geometry(signal_user_data_t *ud, const hb_title_t *title,
-                     hb_geometry_t *srcGeo, hb_geometry_settings_t *uiGeo)
-{
-    srcGeo->width  = title->geometry.width;
-    srcGeo->height = title->geometry.height;
-    srcGeo->par    = title->geometry.par;
-
-    uiGeo->mode = ghb_settings_combo_int(ud->settings, "PicturePAR");
-    uiGeo->keep = (ghb_dict_get_bool(ud->settings, "PictureKeepRatio") ||
-                                 uiGeo->mode == HB_ANAMORPHIC_STRICT  ||
-                                 uiGeo->mode == HB_ANAMORPHIC_LOOSE) ?
-                                 HB_KEEP_DISPLAY_ASPECT : 0;
-    uiGeo->itu_par = 0;
-    uiGeo->modulus = ghb_settings_combo_int(ud->settings, "PictureModulus");
-    uiGeo->crop[0] = ghb_dict_get_int(ud->settings, "PictureTopCrop");
-    uiGeo->crop[1] = ghb_dict_get_int(ud->settings, "PictureBottomCrop");
-    uiGeo->crop[2] = ghb_dict_get_int(ud->settings, "PictureLeftCrop");
-    uiGeo->crop[3] = ghb_dict_get_int(ud->settings, "PictureRightCrop");
-    uiGeo->geometry.width = ghb_dict_get_int(ud->settings, "scale_width");
-    uiGeo->geometry.height = ghb_dict_get_int(ud->settings, "scale_height");
-    uiGeo->geometry.par.num = ghb_dict_get_int(ud->settings, "PicturePARWidth");
-    uiGeo->geometry.par.den = ghb_dict_get_int(ud->settings, "PicturePARHeight");
-    uiGeo->maxWidth = 0;
-    uiGeo->maxHeight = 0;
-    if (ghb_dict_get_bool(ud->prefs, "preview_show_crop"))
-    {
-        gdouble xscale = (gdouble)uiGeo->geometry.width /
-                  (title->geometry.width - uiGeo->crop[2] - uiGeo->crop[3]);
-        gdouble yscale = (gdouble)uiGeo->geometry.height /
-                  (title->geometry.height - uiGeo->crop[0] - uiGeo->crop[1]);
-
-        uiGeo->geometry.width += xscale * (uiGeo->crop[2] + uiGeo->crop[3]);
-        uiGeo->geometry.height += yscale * (uiGeo->crop[0] + uiGeo->crop[1]);
-        uiGeo->crop[0] = 0;
-        uiGeo->crop[1] = 0;
-        uiGeo->crop[2] = 0;
-        uiGeo->crop[3] = 0;
-        uiGeo->modulus = 2;
-    }
+    ghb_ui_update_from_settings("PictureDARWidth", ud->settings);
+    ghb_ui_update_from_settings("DisplayHeight", ud->settings);
+    ghb_set_scale_busy(FALSE);
 }
 
 const char*
@@ -4111,7 +4237,7 @@ ghb_set_custom_filter_tooltip(signal_user_data_t *ud,
                               int filter_id)
 {
     char ** keys = hb_filter_get_keys(filter_id);
-    char  * colon = "", * newline;
+    const char *colon = "";
     char    tooltip[1024];
     int     ii, linelen = 0, pos = 0;
 
@@ -4124,6 +4250,7 @@ ghb_set_custom_filter_tooltip(signal_user_data_t *ud,
                     "Custom %s filter string format:\n\n", desc);
     for (ii = 0; keys[ii] != NULL && pos < 1024; ii++)
     {
+        const char *newline;
         int c = tolower(keys[ii][0]);
         int len = strlen(keys[ii]) + 3;
         if (linelen + len > 60)
@@ -4142,15 +4269,13 @@ ghb_set_custom_filter_tooltip(signal_user_data_t *ud,
     }
     hb_str_vfree(keys);
 
-    GtkWidget *widget = GHB_WIDGET(ud->builder, name);
+    GtkWidget *widget = ghb_builder_widget(name);
     gtk_widget_set_tooltip_text(widget, tooltip);
 }
 
 gboolean
 ghb_validate_filters(GhbValue *settings, GtkWindow *parent)
 {
-    gchar *message;
-
     // Detelecine
     const char *detel_preset;
     detel_preset = ghb_dict_get_string(settings, "PictureDetelecine");
@@ -4166,20 +4291,18 @@ ghb_validate_filters(GhbValue *settings, GtkWindow *parent)
         {
             if (detel_custom != NULL)
             {
-                message = g_strdup_printf(
-                            _("Invalid Detelecine Settings:\n\n"
-                              "Preset:\t%s\n"
-                              "Custom:\t%s\n"), detel_preset, detel_custom);
+                ghb_alert_dialog_show(GTK_MESSAGE_ERROR,
+                                      _("Invalid Detelecine Settings"),
+                                      "%s %s\n%s %s",
+                                      _("Preset:"), detel_preset,
+                                      _("Custom:"), detel_custom);
             }
             else
             {
-                message = g_strdup_printf(
-                            _("Invalid Detelecine Settings:\n\n"
-                              "Preset:\t%s\n"), detel_preset);
+                ghb_alert_dialog_show(GTK_MESSAGE_ERROR,
+                                      _("Invalid Detelecine Settings"),
+                                      "%s %s", _("Preset:"), detel_preset);
             }
-            ghb_message_dialog(parent, GTK_MESSAGE_ERROR,
-                               message, _("Cancel"), NULL);
-            g_free(message);
             return FALSE;
         }
     }
@@ -4199,20 +4322,19 @@ ghb_validate_filters(GhbValue *settings, GtkWindow *parent)
         {
             if (comb_custom != NULL && comb_custom[0] != 0)
             {
-                message = g_strdup_printf(
-                            _("Invalid Comb Detect Settings:\n\n"
-                              "Preset:\t%s\n"
-                              "Custom:\t%s\n"), comb_preset, comb_custom);
+                ghb_alert_dialog_show(GTK_MESSAGE_ERROR,
+                                      _("Invalid Comb Detect Settings"),
+                                      "%s %s\n%s %s",
+                                      _("Preset:"), comb_preset,
+                                      _("Custom:"), comb_custom);
             }
             else
             {
-                message = g_strdup_printf(
-                            _("Invalid Comb Detect Settings:\n\n"
-                              "Preset:\t%s\n"), comb_preset);
+                ghb_alert_dialog_show(GTK_MESSAGE_ERROR,
+                                      _("Invalid Comb Detect Settings"),
+                                      "%s %s",
+                                      _("Preset:"), comb_preset);
             }
-            ghb_message_dialog(parent, GTK_MESSAGE_ERROR,
-                               message, _("Cancel"), NULL);
-            g_free(message);
             return FALSE;
         }
     }
@@ -4235,23 +4357,21 @@ ghb_validate_filters(GhbValue *settings, GtkWindow *parent)
         {
             if (deint_custom != NULL)
             {
-                message = g_strdup_printf(
-                            _("Invalid Deinterlace Settings:\n\n"
-                              "Filter:\t%s\n"
-                              "Preset:\t%s\n"
-                              "Custom:\t%s\n"), deint_filter, deint_preset,
-                                                deint_custom);
+                ghb_alert_dialog_show(GTK_MESSAGE_ERROR,
+                                      _("Invalid Deinterlace Settings"),
+                                      "%s %s\n%s %s\n%s %s",
+                                      _("Filter:"), deint_filter,
+                                      _("Preset:"), deint_preset,
+                                      _("Custom:"), deint_custom);
             }
             else
             {
-                message = g_strdup_printf(
-                            _("Invalid Deinterlace Settings:\n\n"
-                              "Filter:\t%s\n"
-                              "Preset:\t%s\n"), deint_filter, deint_preset);
+                ghb_alert_dialog_show(GTK_MESSAGE_ERROR,
+                                      _("Invalid Deinterlace Settings"),
+                                      "%s %s\n%s %s",
+                                      _("Filter:"), deint_filter,
+                                      _("Preset:"), deint_preset);
             }
-            ghb_message_dialog(parent, GTK_MESSAGE_ERROR,
-                               message, _("Cancel"), NULL);
-            g_free(message);
             return FALSE;
         }
     }
@@ -4273,16 +4393,13 @@ ghb_validate_filters(GhbValue *settings, GtkWindow *parent)
         if (hb_validate_filter_preset(filter_id, denoise_preset, denoise_tune,
                                       denoise_custom))
         {
-            message = g_strdup_printf(
-                        _("Invalid Denoise Settings:\n\n"
-                          "Filter:\t%s\n"
-                          "Preset:\t%s\n"
-                          "Tune:\t%s\n"
-                          "Custom:\t%s\n"), denoise_filter, denoise_preset,
-                                           denoise_tune, denoise_custom);
-            ghb_message_dialog(parent, GTK_MESSAGE_ERROR,
-                               message, _("Cancel"), NULL);
-            g_free(message);
+            ghb_alert_dialog_show(GTK_MESSAGE_ERROR,
+                                  _("Invalid Denoise Settings"),
+                                  "%s %s\n%s %s\n%s %s\n%s %s",
+                                  _("Filter:"), denoise_filter,
+                                  _("Preset:"), denoise_preset,
+                                  _("Tune:"), denoise_tune,
+                                  _("Custom:"), denoise_custom);
             return FALSE;
         }
     }
@@ -4301,16 +4418,13 @@ ghb_validate_filters(GhbValue *settings, GtkWindow *parent)
         if (hb_validate_filter_preset(filter_id, sharpen_preset, sharpen_tune,
                                       sharpen_custom))
         {
-            message = g_strdup_printf(
-                        _("Invalid Sharpen Settings:\n\n"
-                          "Filter:\t%s\n"
-                          "Preset:\t%s\n"
-                          "Tune:\t%s\n"
-                          "Custom:\t%s\n"), sharpen_filter, sharpen_preset,
-                                           sharpen_tune, sharpen_custom);
-            ghb_message_dialog(parent, GTK_MESSAGE_ERROR,
-                               message, _("Cancel"), NULL);
-            g_free(message);
+            ghb_alert_dialog_show(GTK_MESSAGE_ERROR,
+                                  _("Invalid Sharpen Settings"),
+                                  "%s %s\n%s %s\n%s %s\n%s %s",
+                                  _("Filter:"), sharpen_filter,
+                                  _("Preset:"), sharpen_preset,
+                                  _("Tune:"), sharpen_tune,
+                                  _("Custom:"), sharpen_custom);
             return FALSE;
         }
     }
@@ -4322,8 +4436,7 @@ gboolean
 ghb_validate_video(GhbValue *settings, GtkWindow *parent)
 {
     gint vcodec;
-    gchar *message;
-    const char *mux_id;
+    const char *message, *mux_id;
     const hb_container_t *mux;
 
     mux_id = ghb_dict_get_string(settings, "FileFormat");
@@ -4335,32 +4448,28 @@ ghb_validate_video(GhbValue *settings, GtkWindow *parent)
     if ((mux->format & HB_MUX_MASK_MP4) && (vcodec == HB_VCODEC_THEORA))
     {
         // mp4/theora combination is not supported.
-        message = g_strdup_printf(
-                    _("Theora is not supported in the MP4 container.\n\n"
+        message = _("Theora is not supported in the MP4 container.\n\n"
                     "You should choose a different video codec or container.\n"
-                    "If you continue, FFMPEG will be chosen for you."));
+                    "If you continue, FFMPEG will be chosen for you.");
         v_unsup = TRUE;
     }
     else if ((mux->format & HB_MUX_MASK_WEBM) &&
-             (vcodec != HB_VCODEC_FFMPEG_VP8 && vcodec != HB_VCODEC_FFMPEG_VP9))
+             (vcodec != HB_VCODEC_FFMPEG_VP8 && vcodec != HB_VCODEC_FFMPEG_VP9 && vcodec != HB_VCODEC_FFMPEG_VP9_10BIT && vcodec != HB_VCODEC_SVT_AV1 && vcodec != HB_VCODEC_SVT_AV1_10BIT))
     {
-        // webm only supports vp8 and vp9.
-        message = g_strdup_printf(
-                    _("Only VP8 or VP9 is supported in the WebM container.\n\n"
+        // webm only supports vp8, vp9 and av1.
+        message = _("Only VP8, VP9 and AV1 is supported in the WebM container.\n\n"
                     "You should choose a different video codec or container.\n"
-                    "If you continue, one will be chosen for you."));
+                    "If you continue, one will be chosen for you.");
         v_unsup = TRUE;
     }
 
     if (v_unsup)
     {
-        if (!ghb_message_dialog(parent, GTK_MESSAGE_WARNING,
-                                message, _("Cancel"), _("Continue")))
+        if (!ghb_question_dialog_run(parent, GHB_ACTION_NORMAL, _("Continue"),
+                _("Cancel"), _("Invalid Video Codec"), "%s", message))
         {
-            g_free(message);
             return FALSE;
         }
-        g_free(message);
         vcodec = hb_video_encoder_get_default(mux->format);
         ghb_dict_set_string(settings, "VideoEncoder",
                                 hb_video_encoder_get_short_name(vcodec));
@@ -4374,7 +4483,6 @@ ghb_validate_subtitles(GhbValue *settings, GtkWindow *parent)
 {
     gint title_id, titleindex;
     const hb_title_t * title;
-    gchar *message;
 
     title_id = ghb_dict_get_int(settings, "title");
     title = ghb_lookup_title(title_id, &titleindex);
@@ -4407,17 +4515,14 @@ ghb_validate_subtitles(GhbValue *settings, GtkWindow *parent)
         {
             // MP4 can only handle burned vobsubs.  make sure there isn't
             // already something burned in the list
-            message = g_strdup_printf(
-            _("Only one subtitle may be burned into the video.\n\n"
-                "You should change your subtitle selections.\n"
-                "If you continue, some subtitles will be lost."));
-            if (!ghb_message_dialog(parent, GTK_MESSAGE_WARNING,
-                                    message, _("Cancel"), _("Continue")))
+            if (!ghb_question_dialog_run(parent, GHB_ACTION_DESTRUCTIVE,
+                    _("Continue"), _("Cancel"), _("Invalid Subtitle Selection"),
+                    _("Only one subtitle may be burned into the video.\n\n"
+                      "You should change your subtitle selections.\n"
+                      "If you continue, some subtitles will be lost.")))
             {
-                g_free(message);
                 return FALSE;
             }
-            g_free(message);
             break;
         }
         else if (burned)
@@ -4427,17 +4532,14 @@ ghb_validate_subtitles(GhbValue *settings, GtkWindow *parent)
         else if (mux->format & HB_MUX_MASK_WEBM)
         {
             // WebM can only handle burned subs afaik. Their specs are ambiguous here
-            message = g_strdup_printf(
-            _("WebM in HandBrake only supports burned subtitles.\n\n"
-                "You should change your subtitle selections.\n"
-                "If you continue, some subtitles will be lost."));
-            if (!ghb_message_dialog(parent, GTK_MESSAGE_WARNING,
-                                    message, _("Cancel"), _("Continue")))
+            if (!ghb_question_dialog_run(parent, GHB_ACTION_DESTRUCTIVE,
+                    _("Continue"), _("Cancel"), _("Invalid Subtitle Selection"),
+                    _("WebM in HandBrake only supports burned subtitles.\n\n"
+                      "You should change your subtitle selections.\n"
+                      "If you continue, some subtitles will be lost.")))
             {
-                g_free(message);
                 return FALSE;
             }
-            g_free(message);
             break;
         }
         if (import != NULL)
@@ -4447,17 +4549,14 @@ ghb_validate_subtitles(GhbValue *settings, GtkWindow *parent)
             filename = ghb_dict_get_string(import, "Filename");
             if (!g_file_test(filename, G_FILE_TEST_IS_REGULAR))
             {
-                message = g_strdup_printf(
-                _("SRT file does not exist or not a regular file.\n\n"
-                    "You should choose a valid file.\n"
-                    "If you continue, this subtitle will be ignored."));
-                if (!ghb_message_dialog(parent, GTK_MESSAGE_WARNING, message,
-                    _("Cancel"), _("Continue")))
+                if (!ghb_question_dialog_run(parent, GHB_ACTION_NORMAL,
+                    _("Continue"), _("Cancel"), _("Subtitle File Not Found"),
+                    _("SRT file does not exist or not a regular file.\n\n"
+                      "You should choose a valid file.\n"
+                      "If you continue, this subtitle will be ignored.")))
                 {
-                    g_free(message);
                     return FALSE;
                 }
-                g_free(message);
                 break;
             }
         }
@@ -4470,7 +4569,6 @@ ghb_validate_audio(GhbValue *settings, GtkWindow *parent)
 {
     gint title_id, titleindex;
     const hb_title_t * title;
-    gchar *message;
 
     title_id = ghb_dict_get_int(settings, "title");
     title = ghb_lookup_title(title_id, &titleindex);
@@ -4507,18 +4605,15 @@ ghb_validate_audio(GhbValue *settings, GtkWindow *parent)
             !(ghb_audio_can_passthru(aconfig->in.codec) &&
               (aconfig->in.codec & codec)))
         {
-            // Not supported.  AC3 is passthrough only, so input must be AC3
-            message = g_strdup_printf(
-                        _("The source does not support Pass-Thru.\n\n"
-                        "You should choose a different audio codec.\n"
-                        "If you continue, one will be chosen for you."));
-            if (!ghb_message_dialog(parent, GTK_MESSAGE_WARNING,
-                                    message, _("Cancel"), _("Continue")))
+            // Not supported.  AC3 is passthru only, so input must be AC3
+            if (!ghb_question_dialog_run(parent, GHB_ACTION_NORMAL,
+                    _("Continue"), _("Cancel"), _("Invalid Audio Selection"),
+                    _("The source does not support Pass-Thru.\n\n"
+                      "You should choose a different audio codec.\n"
+                      "If you continue, one will be chosen for you.")))
             {
-                g_free(message);
                 return FALSE;
             }
-            g_free(message);
             if ((codec & HB_ACODEC_AC3) ||
                 (aconfig->in.codec & HB_ACODEC_MASK) == HB_ACODEC_DCA)
             {
@@ -4563,17 +4658,14 @@ ghb_validate_audio(GhbValue *settings, GtkWindow *parent)
         }
         if (a_unsup)
         {
-            message = g_strdup_printf(
-                        _("%s is not supported in the %s container.\n\n"
-                        "You should choose a different audio codec.\n"
-                        "If you continue, one will be chosen for you."), a_unsup, mux_s);
-            if (!ghb_message_dialog(parent, GTK_MESSAGE_WARNING,
-                                    message, _("Cancel"), _("Continue")))
+            if (!ghb_question_dialog_run(parent, GHB_ACTION_NORMAL,
+                    _("Continue"), _("Cancel"), _("Invalid Audio Selection"),
+                    _("%s is not supported in the %s container.\n\n"
+                      "You should choose a different audio codec.\n"
+                      "If you continue, one will be chosen for you."), a_unsup, mux_s))
             {
-                g_free(message);
                 return FALSE;
             }
-            g_free(message);
             const char *name = hb_audio_encoder_get_short_name(codec);
             ghb_dict_set_string(asettings, "Encoder", name);
         }
@@ -4612,45 +4704,45 @@ ghb_remove_job(gint unique_id)
 }
 
 void
-ghb_start_queue()
+ghb_start_queue (void)
 {
     hb_start( h_queue );
 }
 
 void
-ghb_stop_queue()
+ghb_stop_queue (void)
 {
     hb_stop( h_queue );
 }
 
 void
-ghb_start_live_encode()
+ghb_start_live_encode (void)
 {
     hb_start( h_live );
 }
 
 void
-ghb_stop_live_encode()
+ghb_stop_live_encode (void)
 {
     hb_stop( h_live );
 }
 
 void
-ghb_pause_queue()
+ghb_pause_queue (void)
 {
     hb_status.queue.state |= GHB_STATE_PAUSED;
     hb_pause( h_queue );
 }
 
 void
-ghb_resume_queue()
+ghb_resume_queue (void)
 {
     hb_status.queue.state &= ~GHB_STATE_PAUSED;
     hb_resume( h_queue );
 }
 
 void
-ghb_pause_resume_queue()
+ghb_pause_resume_queue (void)
 {
     hb_state_t s;
     hb_get_state2( h_queue, &s );
@@ -4665,143 +4757,32 @@ ghb_pause_resume_queue()
     }
 }
 
-static void
-vert_line(
-    GdkPixbuf * pb,
-    guint8 r,
-    guint8 g,
-    guint8 b,
-    gint x,
-    gint y,
-    gint len,
-    gint width)
-{
-    guint8 *pixels = gdk_pixbuf_get_pixels (pb);
-    guint8 *dst;
-    gint ii, jj;
-    gint channels = gdk_pixbuf_get_n_channels (pb);
-    gint stride = gdk_pixbuf_get_rowstride (pb);
-
-    for (jj = 0; jj < width; jj++)
-    {
-        dst = pixels + y * stride + (x+jj) * channels;
-        for (ii = 0; ii < len; ii++)
-        {
-            dst[0] = r;
-            dst[1] = g;
-            dst[2] = b;
-            dst += stride;
-        }
-    }
-}
-
-static void
-horz_line(
-    GdkPixbuf * pb,
-    guint8 r,
-    guint8 g,
-    guint8 b,
-    gint x,
-    gint y,
-    gint len,
-    gint width)
-{
-    guint8 *pixels = gdk_pixbuf_get_pixels (pb);
-    guint8 *dst;
-    gint ii, jj;
-    gint channels = gdk_pixbuf_get_n_channels (pb);
-    gint stride = gdk_pixbuf_get_rowstride (pb);
-
-    for (jj = 0; jj < width; jj++)
-    {
-        dst = pixels + (y+jj) * stride + x * channels;
-        for (ii = 0; ii < len; ii++)
-        {
-            dst[0] = r;
-            dst[1] = g;
-            dst[2] = b;
-            dst += channels;
-        }
-    }
-}
-
-static void
-hash_pixbuf(
-    GdkPixbuf * pb,
-    gint        x,
-    gint        y,
-    gint        w,
-    gint        h,
-    gint        step,
-    gint        orientation)
-{
-    gint ii, jj;
-    gint line_width = 8;
-    struct
-    {
-        guint8 r;
-        guint8 g;
-        guint8 b;
-    } c[4] =
-    {{0x80, 0x80, 0x80},{0xC0, 0x80, 0x70},{0x80, 0xA0, 0x80},{0x70, 0x80, 0xA0}};
-
-    if (!orientation)
-    {
-        // vertical lines
-        for (ii = x, jj = 0; ii+line_width < x+w; ii += step, jj++)
-        {
-            vert_line(pb, c[jj&3].r, c[jj&3].g, c[jj&3].b, ii, y, h, line_width);
-        }
-    }
-    else
-    {
-        // horizontal lines
-        for (ii = y, jj = 0; ii+line_width < y+h; ii += step, jj++)
-        {
-            horz_line(pb, c[jj&3].r, c[jj&3].g, c[jj&3].b, x, ii, w, line_width);
-        }
-    }
-}
-
 GdkPixbuf*
 ghb_get_preview_image(
-    const hb_title_t *title,
     gint index,
-    signal_user_data_t *ud,
-    gint *out_width,
-    gint *out_height)
+    signal_user_data_t *ud)
 {
-    hb_geometry_t srcGeo, resultGeo;
-    hb_geometry_settings_t uiGeo;
+    GhbValue * settings, * job;
 
-    if( title == NULL ) return NULL;
+    settings = ghb_value_dup(ud->settings);
+    ghb_finalize_job(settings);
+    job = ghb_get_job_settings(settings);
 
-    gboolean deinterlace;
-    deinterlace = ghb_settings_combo_int(ud->settings,
-                            "PictureDeinterlaceFilter") != HB_FILTER_INVALID;
-
-    // Get the geometry settings for the preview.  This will disable
-    // cropping if the setting to show the cropped region is enabled.
-    get_preview_geometry(ud, title, &srcGeo, &uiGeo);
-
-    // hb_get_preview doesn't compensate for anamorphic, so lets
-    // calculate scale factors
-    hb_set_anamorphic_size2(&srcGeo, &uiGeo, &resultGeo);
-
-    // Rescale preview dimensions to adjust for screen PAR and settings PAR
-    ghb_par_scale(ud, &uiGeo.geometry.width, &uiGeo.geometry.height,
-                      resultGeo.par.num, resultGeo.par.den);
-    uiGeo.geometry.par.num = 1;
-    uiGeo.geometry.par.den = 1;
-
-    GdkPixbuf *preview;
-    hb_image_t *image;
-    image = hb_get_preview2(h_scan, title->index, index, &uiGeo, deinterlace);
+    GdkPixbuf     * preview;
+    hb_image_t    * image = NULL;
+    if (ghb_get_job_title_id(settings) >= 0)
+    {
+        image = hb_get_preview3(h_scan, index, job);
+    }
+    ghb_value_free(&settings);
 
     if (image == NULL)
     {
-        preview = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8,
-                                 title->geometry.width, title->geometry.height);
+        preview = gdk_pixbuf_new(GDK_COLORSPACE_RGB, FALSE, 8, 854, 480);
+        guint8 * pixels = gdk_pixbuf_get_pixels(preview);
+        gint     stride = gdk_pixbuf_get_rowstride(preview);
+        memset(pixels, 0, 480 * stride);
+
         return preview;
     }
 
@@ -4837,83 +4818,8 @@ ghb_get_preview_image(
         dst += stride;
     }
 
-    *out_width = ghb_dict_get_int(ud->settings, "scale_width");
-    *out_height = ghb_dict_get_int(ud->settings, "scale_height");
-    ghb_par_scale(ud, out_width, out_height,
-                  resultGeo.par.num, resultGeo.par.den);
-
-    gint c0, c1, c2, c3;
-    c0 = ghb_dict_get_int(ud->settings, "PictureTopCrop");
-    c1 = ghb_dict_get_int(ud->settings, "PictureBottomCrop");
-    c2 = ghb_dict_get_int(ud->settings, "PictureLeftCrop");
-    c3 = ghb_dict_get_int(ud->settings, "PictureRightCrop");
-
-    gdouble xscale, yscale;
-    if (ghb_dict_get_bool(ud->prefs, "preview_show_crop"))
-    {
-        xscale = (gdouble)image->width / title->geometry.width;
-        yscale = (gdouble)image->height / title->geometry.height;
-    }
-    else
-    {
-        xscale = (gdouble)image->width / (title->geometry.width - c2 - c3);
-        yscale = (gdouble)image->height / (title->geometry.height - c0 - c1);
-    }
-
-    int previewWidth = image->width;
-    int previewHeight = image->height;
-
-    // If the preview is too large to fit the screen, reduce it's size.
-    if (ghb_dict_get_bool(ud->prefs, "reduce_hd_preview"))
-    {
-        gint factor = 80;
-        gint s_w, s_h;
-
-        ghb_monitor_get_size(GHB_WIDGET(ud->builder, "hb_window"), &s_w, &s_h);
-        if (s_w > 0 && s_h > 0 &&
-            (previewWidth  > s_w * factor / 100 ||
-             previewHeight > s_h * factor / 100))
-        {
-            GdkPixbuf *scaled_preview;
-            int orig_w = previewWidth;
-            int orig_h = previewHeight;
-
-            if (previewWidth > s_w * factor / 100)
-            {
-                previewWidth = s_w * factor / 100;
-                previewHeight = previewHeight * previewWidth / orig_w;
-            }
-            if (previewHeight > s_h * factor / 100)
-            {
-                previewHeight = s_h * factor / 100;
-                previewWidth = orig_w * previewHeight / orig_h;
-            }
-            xscale *= (gdouble)previewWidth / orig_w;
-            yscale *= (gdouble)previewHeight / orig_h;
-            scaled_preview = gdk_pixbuf_scale_simple(preview,
-                            previewWidth, previewHeight, GDK_INTERP_HYPER);
-            g_object_unref(preview);
-            preview = scaled_preview;
-        }
-    }
-
-    if (ghb_dict_get_bool(ud->prefs, "preview_show_crop"))
-    {
-        c0 *= yscale;
-        c1 *= yscale;
-        c2 *= xscale;
-        c3 *= xscale;
-
-        // Top
-        hash_pixbuf(preview, 0, 0, previewWidth, c0, 32, 0);
-        // Bottom
-        hash_pixbuf(preview, 0, previewHeight-c1, previewWidth, c1, 32, 0);
-        // Left
-        hash_pixbuf(preview, 0, 0, c2, previewHeight, 32, 1);
-        // Right
-        hash_pixbuf(preview, previewWidth-c3, 0, c3, previewHeight, 32, 1);
-    }
     hb_image_close(&image);
+
     return preview;
 }
 
@@ -4930,3 +4836,41 @@ ghb_dvd_volname(const gchar *device)
     }
     return NULL;
 }
+
+const gchar *ghb_get_filter_name (hb_filter_object_t *filter)
+{
+    switch (filter->id)
+    {
+        case HB_FILTER_COMB_DETECT:
+            return _("Comb Detect");
+        case HB_FILTER_DETELECINE:
+            return _("Detelecine");
+        case HB_FILTER_YADIF:
+            return _("Deinterlace (Yadif)");
+        case HB_FILTER_BWDIF:
+            return _("Deinterlace (Bwdif)");
+        case HB_FILTER_DECOMB:
+            return _("Decomb");
+        case HB_FILTER_DEBLOCK:
+            return _("Deblock");
+        case HB_FILTER_NLMEANS:
+            return _("Denoise (NLMeans)");
+        case HB_FILTER_HQDN3D:
+            return _("Denoise (HQDN3D)");
+        case HB_FILTER_CHROMA_SMOOTH:
+            return _("Chroma Smooth");
+        case HB_FILTER_UNSHARP:
+            return _("Sharpen (Unsharp)");
+        case HB_FILTER_ROTATE:
+            return _("Rotate");
+        case HB_FILTER_LAPSHARP:
+            return _("Sharpen (lapsharp)");
+        case HB_FILTER_GRAYSCALE:
+            return _("Grayscale");
+        case HB_FILTER_COLORSPACE:
+            return _("Colorspace");
+        default:
+            return filter->name;
+    }
+}
+

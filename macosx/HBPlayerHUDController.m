@@ -10,12 +10,15 @@
 @interface HBPlayerHUDController ()
 
 @property (nonatomic, weak) IBOutlet NSButton *playButton;
+@property (nonatomic, weak) IBOutlet NSButton *beginButton;
+@property (nonatomic, weak) IBOutlet NSButton *endButton;
 @property (nonatomic, weak) IBOutlet NSSlider *slider;
 
+@property (nonatomic, weak) IBOutlet NSButton *volumeButton;
 @property (nonatomic, weak) IBOutlet NSSlider *volumeSlider;
 
 @property (nonatomic, weak) IBOutlet NSTextField *currentTimeLabel;
-@property (nonatomic, weak) IBOutlet NSTextField *remaingTimeLabel;
+@property (nonatomic, weak) IBOutlet NSTextField *remainingTimeLabel;
 
 @property (nonatomic, weak) IBOutlet NSPopUpButton *tracksSelection;
 
@@ -74,14 +77,27 @@
         [self.slider setMaxValue:duration];
         [self.slider setDoubleValue:0.0];
 
-        if (@available(macOS 10.12.2, *))
-        {
-            [self _touchBar_updateMaxDuration:duration];
-        }
+        [self _touchBar_updateMaxDuration:duration];
 
         self.player.volume = self.volumeSlider.floatValue;
 
         [self.player play];
+    }
+}
+
+- (void)viewDidLoad
+{
+    if (@available(macOS 11, *))
+    {
+        self.playButton.imageScaling = NSImageScaleProportionallyUpOrDown;
+
+        self.beginButton.imageScaling = NSImageScaleProportionallyUpOrDown;
+        self.beginButton.image = [NSImage imageWithSystemSymbolName:@"backward.end.alt.fill" accessibilityDescription:nil];
+
+        self.endButton.image = [NSImage imageWithSystemSymbolName:@"forward.end.alt.fill" accessibilityDescription:nil];
+        self.endButton.imageScaling = NSImageScaleProportionallyUpOrDown;
+
+        self.volumeButton.image = [NSImage imageWithSystemSymbolName:@"speaker.wave.3.fill" accessibilityDescription:nil];
     }
 }
 
@@ -202,12 +218,9 @@
 
         self.slider.doubleValue = currentTime;
         self.currentTimeLabel.attributedStringValue = [self _timeToTimecode:currentTime].HB_smallMonospacedString;
-        self.remaingTimeLabel.attributedStringValue = [self _timeToTimecode:duration - currentTime].HB_smallMonospacedString;
+        self.remainingTimeLabel.attributedStringValue = [self _timeToTimecode:duration - currentTime].HB_smallMonospacedString;
 
-        if (@available(macOS 10.12.2, *))
-        {
-            [self _touchBar_updateTime:currentTime duration:duration];
-        }
+        [self _touchBar_updateTime:currentTime duration:duration];
     }
 }
 
@@ -216,17 +229,28 @@
     BOOL playing = self.player.rate != 0.0;
     if (playing)
     {
-        self.playButton.image = [NSImage imageNamed:@"PauseTemplate"];
+        if (@available(macOS 11, *))
+        {
+            self.playButton.image = [NSImage imageWithSystemSymbolName:@"pause.fill" accessibilityDescription:nil];
+        }
+        else
+        {
+            self.playButton.image = [NSImage imageNamed:@"PauseTemplate"];
+        }
     }
     else
     {
-        self.playButton.image = [NSImage imageNamed:@"PlayTemplate"];
+        if (@available(macOS 11, *))
+        {
+            self.playButton.image = [NSImage imageWithSystemSymbolName:@"play.fill" accessibilityDescription:nil];
+        }
+        else
+        {
+            self.playButton.image = [NSImage imageNamed:@"PlayTemplate"];
+        }
     }
 
-    if (@available(macOS 10.12.2, *))
-    {
-        [self _touchBar_updatePlayState:playing];
-    }
+    [self _touchBar_updatePlayState:playing];
 }
 
 - (IBAction)playPauseToggle:(id)sender
@@ -269,13 +293,54 @@
 
 - (IBAction)mute:(id)sender
 {
-    self.volumeSlider.doubleValue = 0;
-    self.player.volume = 0;
+    if (self.volumeSlider.doubleValue == 0)
+    {
+        self.volumeSlider.doubleValue = 1;
+        self.player.volume = 1;
+    }
+    else
+    {
+        self.volumeSlider.doubleValue = 0;
+        self.player.volume = 0;
+    }
+    [self volumeSliderChanged:self.volumeSlider];
 }
 
 - (IBAction)volumeSliderChanged:(NSSlider *)sender
 {
-    self.player.volume = sender.floatValue;
+    float value = sender.floatValue;
+    self.player.volume = value;
+
+    if (@available(macOS 11, *))
+    {
+        if (value == 0)
+        {
+            self.volumeButton.image = [NSImage imageWithSystemSymbolName:@"speaker.slash.fill" accessibilityDescription:nil];
+        }
+        else if (value > 0 && value <= 0.33)
+        {
+            self.volumeButton.image = [NSImage imageWithSystemSymbolName:@"speaker.wave.1.fill" accessibilityDescription:nil];
+        }
+        else if (value > 0.33 && value <= 0.66)
+        {
+            self.volumeButton.image = [NSImage imageWithSystemSymbolName:@"speaker.wave.2.fill" accessibilityDescription:nil];
+        }
+        else if (value > 0.66)
+        {
+            self.volumeButton.image = [NSImage imageWithSystemSymbolName:@"speaker.wave.3.fill" accessibilityDescription:nil];
+        }
+    }
+    else
+    {
+        if (value == 0)
+        {
+            self.volumeButton.image = [NSImage imageNamed:@"volLowTemplate"];
+        }
+        else
+        {
+            self.volumeButton.image = [NSImage imageNamed:@"volHighTemplate"];
+        }
+    }
 }
 
 #pragma mark - Keyboard and mouse wheel control

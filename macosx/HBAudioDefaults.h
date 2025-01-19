@@ -39,7 +39,10 @@ typedef NS_ENUM(NSUInteger, HBAudioTrackSelectionBehavior) {
 @property(nonatomic, readwrite) BOOL allowDTSPassthru;
 @property(nonatomic, readwrite) BOOL allowMP2Passthru;
 @property(nonatomic, readwrite) BOOL allowMP3Passthru;
+@property(nonatomic, readwrite) BOOL allowVorbisPassthru;
+@property(nonatomic, readwrite) BOOL allowOpusPassthru;
 @property(nonatomic, readwrite) BOOL allowTrueHDPassthru;
+@property(nonatomic, readwrite) BOOL allowALACPassthru;
 @property(nonatomic, readwrite) BOOL allowFLACPassthru;
 
 @property(nonatomic, readwrite) int encoderFallback;
@@ -48,7 +51,6 @@ typedef NS_ENUM(NSUInteger, HBAudioTrackSelectionBehavior) {
 @property(nonatomic, readonly) NSArray<NSString *> *audioEncoderFallbacks;
 
 - (void)validateEncoderFallbackForVideoContainer:(int)container;
-- (void)applyPreset:(HBPreset *)preset;
 
 @property (nonatomic, readwrite, weak, nullable) NSUndoManager *undo;
 

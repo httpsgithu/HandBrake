@@ -1,6 +1,6 @@
 /* preset.h
 
-   Copyright (c) 2003-2021 HandBrake Team
+   Copyright (c) 2003-2024 HandBrake Team
    This file is part of the HandBrake source code
    Homepage: <http://handbrake.fr/>.
    It may be used under the terms of the GNU General Public License v2.
@@ -168,7 +168,7 @@ hb_preset_index_t * hb_preset_search_index(const char *name,
                                            int recurse, int type);
 hb_value_t        * hb_preset_search(const char *name, int recurse, int type);
 char              * hb_preset_search_json(const char *name,
-                                          int recurs, int typee);
+                                          int recurs, int type);
 
 hb_value_t * hb_presets_get_folder_children(const hb_preset_index_t *path);
 hb_value_t * hb_preset_get(const hb_preset_index_t *path);

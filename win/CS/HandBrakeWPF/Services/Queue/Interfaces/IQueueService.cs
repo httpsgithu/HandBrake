@@ -16,12 +16,8 @@ namespace HandBrakeWPF.Services.Queue.Interfaces
 
     using HandBrakeWPF.EventArgs;
     using HandBrakeWPF.Services.Encode.EventArgs;
-    using HandBrakeWPF.Services.Encode.Interfaces;
     using HandBrakeWPF.Services.Queue.Model;
 
-    /// <summary>
-    /// The Queue Processor
-    /// </summary>
     public interface IQueueService
     {
         /// <summary>
@@ -56,6 +52,8 @@ namespace HandBrakeWPF.Services.Queue.Interfaces
         /// Gets the number of jobs in the queue
         /// </summary>
         int Count { get; }
+
+        int ActiveJobCount { get; }
 
         /// <summary>
         /// Gets the number of errors detected in the queue.
@@ -159,29 +157,14 @@ namespace HandBrakeWPF.Services.Queue.Interfaces
         List<string> GetLogFilePaths();
 
         /// <summary>
-        /// Get the first job on the queue for processing.
-        /// This also removes the job from the Queue and sets the LastProcessedJob
+        /// Moves items in the queue list
         /// </summary>
-        /// <returns>
-        /// An encode Job object.
-        /// </returns>
-        QueueTask GetNextJobForProcessing();
+        void MoveToBottom(IList<QueueTask> moveItems);
 
         /// <summary>
-        /// Moves an item down one position in the queue.
+        /// Moves items in the queue list
         /// </summary>
-        /// <param name="index">
-        /// The zero-based location of the job in the queue.
-        /// </param>
-        void MoveDown(int index);
-
-        /// <summary>
-        /// Moves an item up one position in the queue.
-        /// </summary>
-        /// <param name="index">
-        /// The zero-based location of the job in the queue.
-        /// </param>
-        void MoveUp(int index);
+        void MoveToTop(IList<QueueTask> moveItems);
 
         /// <summary>
         /// Remove a job from the Queue.
@@ -191,14 +174,6 @@ namespace HandBrakeWPF.Services.Queue.Interfaces
         /// The job.
         /// </param>
         void Remove(QueueTask job);
-
-        /// <summary>
-        /// Reset a Queued Item from Error or Completed to Waiting
-        /// </summary>
-        /// <param name="job">
-        /// The job.
-        /// </param>
-        void ResetJobStatusToWaiting(QueueTask job);
 
         /// <summary>
         /// Restore a Queue from file or from the queue backup file.

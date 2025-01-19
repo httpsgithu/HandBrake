@@ -48,6 +48,26 @@ namespace HandBrakeWPF.Controls
         public static readonly DependencyProperty SecondaryActionTextProperty =
             DependencyProperty.Register("SecondaryActionText", typeof(string), typeof(StatusPanel), new UIPropertyMetadata("Open Log Window"));
 
+        public static readonly DependencyProperty ProgressPercentageProperty =
+            DependencyProperty.Register("ProgressPercentage", typeof(double), typeof(StatusPanel), new UIPropertyMetadata(0d, ProgressPercentagePropertyCallback));
+
+        private static void ProgressPercentagePropertyCallback(DependencyObject d, DependencyPropertyChangedEventArgs e)
+        {
+            StatusPanel p = d as StatusPanel;
+            if (p != null)
+            {
+                if (e.NewValue is double && (double)e.NewValue > 0)
+                {
+                    p.progressBar.IsIndeterminate = false;
+                    p.IsIndeterminate = false;
+                }
+            }
+        }
+
+        public static readonly DependencyProperty IsIndeterminateProperty =
+            DependencyProperty.Register("IsIndeterminate", typeof(bool), typeof(StatusPanel), new UIPropertyMetadata(true));
+        
+
         /// <summary>
         /// Gets or sets a value indicating whether IsLoading.
         /// </summary>
@@ -55,6 +75,18 @@ namespace HandBrakeWPF.Controls
         {
             get { return (bool)GetValue(IsLoadingProperty); }
             set { SetValue(IsLoadingProperty, value); }
+        }
+
+        public double ProgressPercentage
+        {
+            get { return (double)GetValue(ProgressPercentageProperty); }
+            set { SetValue(ProgressPercentageProperty, value); }
+        }
+
+        public bool IsIndeterminate
+        {
+            get { return (bool)GetValue(IsIndeterminateProperty); }
+            set { SetValue(IsIndeterminateProperty, value); }
         }
 
         /// <summary>
@@ -151,7 +183,7 @@ namespace HandBrakeWPF.Controls
         /// <summary>
         /// Gets a value indicating whether is action 2 button visible.
         /// </summary>
-        public bool IsActionButton2Visibile
+        public bool IsActionButton2Visible
         {
             get
             {

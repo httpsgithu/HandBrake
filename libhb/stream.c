@@ -1,6 +1,6 @@
 /* stream.c
 
-   Copyright (c) 2003-2021 HandBrake Team
+   Copyright (c) 2003-2024 HandBrake Team
    This file is part of the HandBrake source code
    Homepage: <http://handbrake.fr/>.
    It may be used under the terms of the GNU General Public License v2.
@@ -10,10 +10,12 @@
 #include <string.h>
 #include <ctype.h>
 #include <errno.h>
+#include <iconv.h>
 
 #include "handbrake/handbrake.h"
 #include "handbrake/hbffmpeg.h"
 #include "handbrake/lang.h"
+#include "handbrake/extradata.h"
 #include "libbluray/bluray.h"
 
 #define min(a, b) a < b ? a : b
@@ -137,6 +139,7 @@ typedef struct {
     int               pid;
     uint8_t           is_pcr;
     int               pes_list;
+    int               start;
 } hb_ts_stream_t;
 
 typedef struct {
@@ -154,9 +157,11 @@ typedef struct {
     int      next;          // next pointer for list
                             // hb_ts_stream_t points to a list of
                             // hb_pes_stream_t
-    hb_buffer_t  *probe_buf;
-    int      probe_next_size;
-    int      probe_count;
+    hb_buffer_t * probe_buf;
+    int           probe_next_size;
+    int           probe_count;
+    uint8_t *     extradata;
+    int           extradata_size;
 } hb_pes_stream_t;
 
 struct hb_stream_s
@@ -217,7 +222,7 @@ struct hb_stream_s
     hb_title_t *title;
 
     AVFormatContext *ffmpeg_ic;
-    AVPacket ffmpeg_pkt;
+    AVPacket *ffmpeg_pkt;
     uint8_t ffmpeg_video_id;
 
     uint32_t reg_desc;          // 4 byte registration code that identifies
@@ -661,6 +666,16 @@ static void hb_stream_delete_dynamic( hb_stream_t *d )
             {
                 hb_buffer_close(&(d->ts.list[i].buf));
                 d->ts.list[i].buf = NULL;
+            }
+        }
+    }
+    if ( d->pes.list )
+    {
+        for (i = 0; i < d->pes.count; i++)
+        {
+            if (d->pes.list[i].extradata)
+            {
+                free(d->pes.list[i].extradata);
             }
         }
     }
@@ -1806,7 +1821,7 @@ int hb_stream_seek_chapter( hb_stream_t * stream, int chapter_num )
  * hb_stream_chapter
  ***********************************************************************
  * Return the number of the chapter that we are currently in. We store
- * the chapter number starting from 0, so + 1 for the real chpater num.
+ * the chapter number starting from 0, so + 1 for the real chapter num.
  **********************************************************************/
 int hb_stream_chapter( hb_stream_t * src_stream )
 {
@@ -1924,7 +1939,7 @@ static const char *stream_type_name2(hb_stream_t *stream, hb_pes_stream_t *pes)
     }
     if ( pes->codec & HB_ACODEC_FF_MASK )
     {
-        AVCodec * codec = avcodec_find_decoder( pes->codec_param );
+        const AVCodec *codec = avcodec_find_decoder( pes->codec_param );
         if ( codec && codec->name && codec->name[0] )
         {
             strncpyupper( codec_name_caps, codec->name, 80 );
@@ -1987,6 +2002,12 @@ static void pes_add_subtitle_to_title(
                     subtitle->source = DVBSUB;
                     subtitle->format = PICTURESUB;
                     subtitle->config.dest = RENDERSUB;
+                    if (pes->extradata != NULL)
+                    {
+                        hb_set_extradata(&subtitle->extradata,
+                                         pes->extradata,
+                                         pes->extradata_size);
+                    }
                     break;
                 case AV_CODEC_ID_HDMV_PGS_SUBTITLE:
                     subtitle->source = PGSSUB;
@@ -2013,7 +2034,7 @@ static void pes_add_subtitle_to_title(
     }
 
     lang = lang_for_code( pes->lang_code );
-    snprintf(subtitle->lang, sizeof( subtitle->lang ), "%s [%s]",
+    snprintf(subtitle->lang, sizeof( subtitle->lang ), "%s (%s)",
              strlen(lang->native_name) ? lang->native_name : lang->eng_name,
              hb_subsource_name(subtitle->source));
     snprintf(subtitle->iso639_2, sizeof( subtitle->iso639_2 ), "%s",
@@ -2077,15 +2098,48 @@ static void pes_add_subtitle_to_title(
     }
 }
 
+// Fix up title.list_audio indexes since audio can be inserted
+// out of order in pes_add_audio_to_title
+static void pes_set_audio_indices(hb_title_t * title)
+{
+    int ii, jj, count;
+
+    count = hb_list_count( title->list_audio );
+
+    for ( ii = 0; ii < count; ii++ )
+    {
+        hb_audio_t *audio_ii;
+
+        audio_ii = hb_list_item( title->list_audio, ii );
+        audio_ii->config.index = ii;
+        for ( jj = 0; jj < count; jj++ )
+        {
+            hb_audio_t *audio_jj;
+
+            audio_jj = hb_list_item( title->list_audio, jj );
+            // if same PID or stream_id and not same audio track, link
+            if ((audio_ii->id & 0xffff) == (audio_jj->id & 0xffff) && ii != jj)
+            {
+                if (audio_ii->config.list_linked_index == NULL)
+                {
+                    audio_ii->config.list_linked_index = hb_list_init();
+                }
+                hb_list_add_dup(audio_ii->config.list_linked_index,
+                                &jj, sizeof(jj));
+            }
+        }
+    }
+}
+
 // Sort specifies the index in the audio list where you would
 // like sorted items to begin.
 static void pes_add_audio_to_title(
     hb_stream_t *stream,
-    int         idx,
+    int         track,
     hb_title_t  *title,
     int         sort)
 {
-    hb_pes_stream_t *pes = &stream->pes.list[idx];
+    hb_pes_stream_t *pes = &stream->pes.list[track];
 
     // Sort by id when adding to the list
     // This assures that they are always displayed in the same order
@@ -2120,7 +2174,7 @@ static void pes_add_audio_to_title(
     hb_log("stream id 0x%x (type 0x%x substream 0x%x) audio 0x%x",
            pes->stream_id, pes->stream_type, pes->stream_id_ext, audio->id);
 
-    audio->config.in.track = idx;
+    audio->config.in.track = track;
 
     // Search for the sort position
     if ( sort >= 0 )
@@ -2217,6 +2271,7 @@ static void hb_init_audio_list(hb_stream_t *stream, hb_title_t *title)
             pes_add_audio_to_title( stream, ii, title, count );
         }
     }
+    pes_set_audio_indices(title);
 }
 
 /***********************************************************************
@@ -2486,7 +2541,7 @@ static inline void bits_init(bitbuf_t *bb, uint8_t* buf, int bufsize, int clear)
     bb->pos = 0;
     bb->buf = buf;
     bb->size = bufsize;
-    bb->val = (bb->buf[0] << 24) | (bb->buf[1] << 16) |
+    bb->val = ((uint32_t)bb->buf[0] << 24) | (bb->buf[1] << 16) |
               (bb->buf[2] << 8) | bb->buf[3];
     if (clear)
         memset(bb->buf, 0, bufsize);
@@ -2551,7 +2606,7 @@ static inline unsigned int bits_get(bitbuf_t *bb, int bits)
         bits -= left;
 
         int pos = bb->pos >> 3;
-        bb->val = (bb->buf[pos] << 24) | (bb->buf[pos + 1] << 16) | (bb->buf[pos + 2] << 8) | bb->buf[pos + 3];
+        bb->val = ((uint32_t)bb->buf[pos] << 24) | (bb->buf[pos + 1] << 16) | (bb->buf[pos + 2] << 8) | bb->buf[pos + 3];
 
         if (bits > 0)
         {
@@ -2624,13 +2679,39 @@ static void decode_element_descriptors(
 
             case 0x59:  // DVB Subtitleing descriptor
             {
+                int lang_count = len / 8;
+
                 stream->pes.list[pes_idx].stream_type = 0x00;
                 stream->pes.list[pes_idx].stream_kind = S;
                 stream->pes.list[pes_idx].codec = WORK_DECAVSUB;
                 stream->pes.list[pes_idx].codec_param = AV_CODEC_ID_DVB_SUBTITLE;
                 strncpy(stream->pes.list[pes_idx].codec_name,
                         "DVB Subtitling", 80);
-                bits_skip(bb, 8 * len);
+                if (lang_count > 0)
+                {
+                    uint8_t * extradata = malloc(5);
+                    char      code[3];
+
+                    stream->pes.list[pes_idx].extradata = extradata;
+                    stream->pes.list[pes_idx].extradata_size = 5;
+                    code[0] = bits_get(bb, 8);
+                    code[1] = bits_get(bb, 8);
+                    code[2] = bits_get(bb, 8);
+
+                    extradata[4] = bits_get(bb, 8);
+                    *extradata++ = bits_get(bb, 8);
+                    *extradata++ = bits_get(bb, 8);
+                    *extradata++ = bits_get(bb, 8);
+                    *extradata++ = bits_get(bb, 8);
+
+                    stream->pes.list[pes_idx].lang_code =
+                                        lang_to_code(lang_for_code2(code));
+                    bits_skip(bb, 8 * (len - 8));
+                }
+                else
+                {
+                    bits_skip(bb, 8 * len);
+                }
             } break;
 
             case 0x6a:  // DVB AC-3 descriptor
@@ -3289,7 +3370,7 @@ static int hb_parse_ps(
 static int hb_ps_read_packet( hb_stream_t * stream, hb_buffer_t *b )
 {
     // Appends to buffer if size != 0
-    int start_code = -1;
+    unsigned int start_code = -1;
     int pos = b->size;
     int stream_id = -1;
     int c;
@@ -3961,8 +4042,8 @@ static void hb_ps_stream_find_streams(hb_stream_t *stream)
                 // (which do not have a program stream map)  may use
                 // this for other types of video.
                 //
-                // Also, the hddvd tards decided to use 0xe2 and 0xe3 for
-                // h.264 video :( and the twits decided not to put a
+                // Also, the hddvd folks decided to use 0xe2 and 0xe3 for
+                // h.264 video :( and the folks decided not to put a
                 // program stream map in the stream :'(
                 //
                 // So set this to an unknown stream type and probe.
@@ -4007,16 +4088,19 @@ static int probe_dts_profile( hb_stream_t *stream, hb_pes_stream_t *pes )
     }
     switch (info.profile)
     {
-        case FF_PROFILE_DTS:
-        case FF_PROFILE_DTS_ES:
-        case FF_PROFILE_DTS_96_24:
+        case AV_PROFILE_DTS:
+        case AV_PROFILE_DTS_ES:
+        case AV_PROFILE_DTS_96_24:
+        case AV_PROFILE_DTS_EXPRESS:
             pes->codec = HB_ACODEC_DCA;
             pes->stream_type = 0x82;
             pes->stream_kind = A;
             break;
 
-        case FF_PROFILE_DTS_HD_HRA:
-        case FF_PROFILE_DTS_HD_MA:
+        case AV_PROFILE_DTS_HD_HRA:
+        case AV_PROFILE_DTS_HD_MA:
+        case AV_PROFILE_DTS_HD_MA_X:
+        case AV_PROFILE_DTS_HD_MA_X_IMAX:
             pes->stream_type = 0;
             pes->stream_kind = A;
             break;
@@ -4026,7 +4110,7 @@ static int probe_dts_profile( hb_stream_t *stream, hb_pes_stream_t *pes )
             return 0;
     }
     const char *profile_name;
-    AVCodec *codec = avcodec_find_decoder( pes->codec_param );
+    const AVCodec *codec = avcodec_find_decoder( pes->codec_param );
     profile_name = av_get_profile_name( codec, info.profile );
     if ( profile_name )
     {
@@ -4041,7 +4125,7 @@ static int
 do_deep_probe(hb_stream_t *stream, hb_pes_stream_t *pes)
 {
     int       result = 0;
-    AVCodec * codec = avcodec_find_decoder(pes->codec_param);
+    const AVCodec *codec = avcodec_find_decoder(pes->codec_param);
 
     if (codec == NULL)
     {
@@ -4169,7 +4253,7 @@ static int do_probe(hb_stream_t *stream, hb_pes_stream_t *pes, hb_buffer_t *buf)
         return result;
     }
 
-    AVInputFormat *fmt = NULL;
+    const AVInputFormat *fmt = NULL;
     int score = 0;
     AVProbeData pd = {0,};
 
@@ -4178,7 +4262,7 @@ static int do_probe(hb_stream_t *stream, hb_pes_stream_t *pes, hb_buffer_t *buf)
     fmt = av_probe_input_format2( &pd, 1, &score );
     if ( fmt && score > AVPROBE_SCORE_MAX / 2 )
     {
-        AVCodec *codec = avcodec_find_decoder_by_name( fmt->name );
+        const AVCodec *codec = avcodec_find_decoder_by_name( fmt->name );
         if( !codec )
         {
             int i;
@@ -4906,7 +4990,7 @@ hb_buffer_t * hb_ts_decode_pkt( hb_stream_t *stream, const uint8_t * pkt,
     // Continuity only increments for adaption values of 0x3 or 0x01
     // and is not checked for start packets.
     hb_ts_stream_t * ts_stream = &stream->ts.list[curstream];
-    int start = (pkt[1] & 0x40) != 0;
+    ts_stream->start = ts_stream->start || ((pkt[1] & 0x40) != 0);
 
     if ( (adaption & 0x01) != 0 )
     {
@@ -4939,7 +5023,7 @@ hb_buffer_t * hb_ts_decode_pkt( hb_stream_t *stream, const uint8_t * pkt,
                 return hb_buffer_list_clear(&list);
             }
         }
-        if ( !start && (ts_stream->continuity != -1) &&
+        if ( !ts_stream->start && (ts_stream->continuity != -1) &&
              !ts_stream->skipbad &&
              (continuity != ( (ts_stream->continuity + 1) & 0xf ) ) )
         {
@@ -4984,7 +5068,7 @@ hb_buffer_t * hb_ts_decode_pkt( hb_stream_t *stream, const uint8_t * pkt,
     }
 
     /* If we get here the packet is valid - process its data */
-    if (start)
+    if (ts_stream->start)
     {
         // Found the start of a new PES packet.
         // If we have previous packet data on this stream,
@@ -5002,6 +5086,11 @@ hb_buffer_t * hb_ts_decode_pkt( hb_stream_t *stream, const uint8_t * pkt,
 
         // PES must begin with an mpeg start code
         const uint8_t *pes = pkt + adapt_len + 4;
+        if (adapt_len + 4 + 3 > stream->packetsize)
+        {
+            return hb_buffer_list_clear(&list);
+        }
+        ts_stream->start = 0;
         if (pes[0] != 0x00 || pes[1] != 0x00 || pes[2] != 0x01)
         {
             ts_err( stream, curstream, "missing start code" );
@@ -5022,6 +5111,10 @@ hb_buffer_t * hb_ts_decode_pkt( hb_stream_t *stream, const uint8_t * pkt,
             {
                 // PES must begin with an mpeg start code & contain
                 // a DTS or PTS.
+                if (adapt_len + 4 + 19 >= stream->packetsize)
+                {
+                    return hb_buffer_list_clear(&list);
+                }
                 if (stream->ts.last_timestamp < 0 && (pes[7] >> 6) == 0)
                 {
                     return hb_buffer_list_clear(&list);
@@ -5186,14 +5279,45 @@ static int ffmpeg_open( hb_stream_t *stream, hb_title_t *title, int scan )
     }
     av_dict_free( &av_opts );
 
+    if (title->color_prim     == HB_COLR_PRI_UNSET &&
+        title->color_transfer == HB_COLR_TRA_UNSET &&
+        title->color_matrix   == HB_COLR_MAT_UNSET)
+    {
+        // Read the video track color info
+        // before it's overwritten with the stream info
+        // in avformat_find_stream_info
+        for (int i = 0; i < info_ic->nb_streams; ++i)
+        {
+            AVStream *st = info_ic->streams[i];
+
+            if ( st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO &&
+                !(st->disposition & AV_DISPOSITION_ATTACHED_PIC) &&
+                avcodec_find_decoder(st->codecpar->codec_id))
+            {
+                AVCodecParameters *codecpar = st->codecpar;
+                title->color_prim     = codecpar->color_primaries;
+                title->color_transfer = codecpar->color_trc;
+                title->color_matrix   = codecpar->color_space;
+                title->color_range    = codecpar->color_range;
+                break;
+            }
+        }
+    }
+
     if ( avformat_find_stream_info( info_ic, NULL ) < 0 )
         goto fail;
 
     title->opaque_priv = (void*)info_ic;
     stream->ffmpeg_ic = info_ic;
     stream->hb_stream_type = ffmpeg;
-    av_init_packet(&stream->ffmpeg_pkt);
     stream->chapter_end = INT64_MAX;
+    stream->ffmpeg_pkt = av_packet_alloc();
+
+    if (stream->ffmpeg_pkt == NULL)
+    {
+        hb_error("stream: av_packet_alloc failed");
+        goto fail;
+    }
 
     if ( !scan )
     {
@@ -5227,14 +5351,15 @@ static int ffmpeg_open( hb_stream_t *stream, hb_title_t *title, int scan )
     return 1;
 
   fail:
-    if ( info_ic ) avformat_close_input( &info_ic );
+    avformat_close_input(&info_ic);
+    av_packet_free(&stream->ffmpeg_pkt);
     return 0;
 }
 
 static void ffmpeg_close( hb_stream_t *d )
 {
     avformat_close_input( &d->ffmpeg_ic );
-    av_packet_unref(&d->ffmpeg_pkt);
+    av_packet_free(&d->ffmpeg_pkt);
 }
 
 // Track names can be in multiple metadata entries, one per
@@ -5281,6 +5406,75 @@ static const char * ffmpeg_track_name(AVStream * st, const char * lang)
     return NULL;
 }
 
+static void add_ffmpeg_linked_audio(hb_audio_t * audio, int audio_index, hb_list_t * list_linked_index)
+{
+    if (audio->config.list_linked_index != NULL)
+    {
+	return;
+    }
+    audio->config.list_linked_index = hb_list_init();
+    hb_list_add_dup(audio->config.list_linked_index, &audio_index, sizeof(audio_index));
+
+    int ii;
+    int linked_count = hb_list_count(list_linked_index);
+    for (ii = 0; ii < linked_count; ii++)
+    {
+	int linked_index = *(int*)hb_list_item(list_linked_index, ii);
+	if (linked_index != audio_index && linked_index != audio->config.index)
+	{
+            hb_list_add_dup(audio->config.list_linked_index, &linked_index, sizeof(audio_index));
+	}
+    }
+}
+
+static void find_ffmpeg_fallback_audio(hb_title_t *title)
+{
+    int count = hb_list_count(title->list_audio);
+    int ii, jj, kk;
+
+    for (ii = 0; ii < count; ii++)
+    {
+        hb_audio_t *audio_ii = hb_list_item(title->list_audio, ii);
+
+        if (audio_ii->config.list_linked_index != NULL)
+        {
+            hb_list_t * list_linked_index = audio_ii->config.list_linked_index;
+            hb_list_t * new_list_linked_index = hb_list_init();
+            int         linked_count = hb_list_count(list_linked_index);
+
+            for (jj = 0; jj < linked_count; jj++)
+            {
+                int linked_index = *(int*)hb_list_item(list_linked_index, jj);
+                for (kk = 0; kk < count; kk++)
+                {
+                    hb_audio_t *audio_kk = hb_list_item(title->list_audio, kk);
+                    if (linked_index == audio_kk->id && kk != ii)
+                    {
+                        hb_list_add_dup(new_list_linked_index, &kk, sizeof(kk));
+                        add_ffmpeg_linked_audio(audio_kk, ii, list_linked_index);
+                        break;
+                    }
+                }
+            }
+            int * item;
+            while ((item = hb_list_item(list_linked_index, 0)))
+            {
+                hb_list_rem(list_linked_index, item);
+                free(item);
+            }
+            hb_list_close(&audio_ii->config.list_linked_index);
+            if (hb_list_count(new_list_linked_index) > 0)
+            {
+                audio_ii->config.list_linked_index = new_list_linked_index;
+            }
+            else
+            {
+                hb_list_close(&new_list_linked_index);
+            }
+        }
+    }
+}
+
 static void add_ffmpeg_audio(hb_title_t *title, hb_stream_t *stream, int id)
 {
     AVStream *st                = stream->ffmpeg_ic->streams[id];
@@ -5290,8 +5484,39 @@ static void add_ffmpeg_audio(hb_title_t *title, hb_stream_t *stream, int id)
                                               tag_lang->value : "und");
     const char        * name = ffmpeg_track_name(st, lang->iso639_2);
 
-    hb_audio_t *audio              = calloc(1, sizeof(*audio));
+    hb_audio_t        * audio = calloc(1, sizeof(*audio));
+    int ii;
+    for (ii = 0; ii < st->codecpar->nb_coded_side_data; ii++)
+    {
+        AVPacketSideData *sd = &st->codecpar->coded_side_data[ii];
+        switch (sd->type)
+        {
+            case AV_PKT_DATA_FALLBACK_TRACK:
+            {
+                if (sd->size == sizeof(int))
+                {
+                    int fallback = *(int*)sd->data;
+                    if (audio->config.list_linked_index == NULL)
+                    {
+                        audio->config.list_linked_index = hb_list_init();
+                    }
+                    // This is not actually the "right" index to store
+                    // in list_linked_index. But we need the complete
+                    // audio list before we can correct it.
+                    //
+                    // This gets corrected in find_ffmpeg_fallback_audio
+                    // after all tracks have been scanned.
+                    hb_list_add_dup(audio->config.list_linked_index,
+                                    &fallback, sizeof(fallback));
+                }
+            } break;
+
+            default:
+                break;
+        }
+    }
     audio->id                      = id;
+    audio->config.index            = hb_list_count(title->list_audio);
     audio->config.in.track         = id;
     audio->config.in.codec         = HB_ACODEC_FFMPEG;
     audio->config.in.codec_param   = codecpar->codec_id;
@@ -5310,15 +5535,19 @@ static void add_ffmpeg_audio(hb_title_t *title, hb_stream_t *stream, int id)
     {
         case AV_CODEC_ID_AAC:
         {
-            int len = MIN(codecpar->extradata_size, HB_CONFIG_MAX_SIZE);
-            memcpy(audio->priv.config.extradata.bytes, codecpar->extradata, len);
-            audio->priv.config.extradata.length = len;
-            audio->config.in.codec              = HB_ACODEC_FFAAC;
+            hb_set_extradata(&audio->priv.extradata, codecpar->extradata, codecpar->extradata_size);
+            audio->config.in.codec = HB_ACODEC_FFAAC;
         } break;
 
         case AV_CODEC_ID_AC3:
-            audio->config.in.codec       = HB_ACODEC_AC3;
+            audio->config.in.codec = HB_ACODEC_AC3;
             break;
+
+        case AV_CODEC_ID_ALAC:
+        {
+            hb_set_extradata(&audio->priv.extradata, codecpar->extradata, codecpar->extradata_size);
+            audio->config.in.codec = HB_ACODEC_FFALAC;
+        } break;
 
         case AV_CODEC_ID_EAC3:
             audio->config.in.codec = HB_ACODEC_FFEAC3;
@@ -5332,14 +5561,17 @@ static void add_ffmpeg_audio(hb_title_t *title, hb_stream_t *stream, int id)
         {
             switch (codecpar->profile)
             {
-                case FF_PROFILE_DTS:
-                case FF_PROFILE_DTS_ES:
-                case FF_PROFILE_DTS_96_24:
+                case AV_PROFILE_DTS:
+                case AV_PROFILE_DTS_ES:
+                case AV_PROFILE_DTS_96_24:
+                case AV_PROFILE_DTS_EXPRESS:
                     audio->config.in.codec = HB_ACODEC_DCA;
                     break;
 
-                case FF_PROFILE_DTS_HD_MA:
-                case FF_PROFILE_DTS_HD_HRA:
+                case AV_PROFILE_DTS_HD_MA:
+                case AV_PROFILE_DTS_HD_HRA:
+                case AV_PROFILE_DTS_HD_MA_X:
+                case AV_PROFILE_DTS_HD_MA_X_IMAX:
                     audio->config.in.codec = HB_ACODEC_DCA_HD;
                     break;
 
@@ -5350,10 +5582,8 @@ static void add_ffmpeg_audio(hb_title_t *title, hb_stream_t *stream, int id)
 
         case AV_CODEC_ID_FLAC:
         {
-            int len = MIN(codecpar->extradata_size, HB_CONFIG_MAX_SIZE);
-            memcpy(audio->priv.config.extradata.bytes, codecpar->extradata, len);
-            audio->priv.config.extradata.length = len;
-            audio->config.in.codec              = HB_ACODEC_FFFLAC;
+            hb_set_extradata(&audio->priv.extradata, codecpar->extradata, codecpar->extradata_size);
+            audio->config.in.codec = HB_ACODEC_FFFLAC;
         } break;
 
         case AV_CODEC_ID_MP2:
@@ -5363,6 +5593,18 @@ static void add_ffmpeg_audio(hb_title_t *title, hb_stream_t *stream, int id)
         case AV_CODEC_ID_MP3:
             audio->config.in.codec = HB_ACODEC_MP3;
             break;
+
+        case AV_CODEC_ID_VORBIS:
+        {
+            hb_set_extradata(&audio->priv.extradata, codecpar->extradata, codecpar->extradata_size);
+            audio->config.in.codec = HB_ACODEC_VORBIS;
+        } break;
+
+        case AV_CODEC_ID_OPUS:
+        {
+            hb_set_extradata(&audio->priv.extradata, codecpar->extradata, codecpar->extradata_size);
+            audio->config.in.codec = HB_ACODEC_OPUS;
+        } break;
 
         default:
             break;
@@ -5590,7 +5832,7 @@ static void add_ffmpeg_subtitle( hb_title_t *title, hb_stream_t *stream, int id 
             return;
     }
 
-    snprintf(subtitle->lang, sizeof( subtitle->lang ), "%s [%s]",
+    snprintf(subtitle->lang, sizeof( subtitle->lang ), "%s (%s)",
              strlen(lang->native_name) ? lang->native_name : lang->eng_name,
              hb_subsource_name(subtitle->source));
     strncpy(subtitle->iso639_2, lang->iso639_2, 3);
@@ -5603,11 +5845,7 @@ static void add_ffmpeg_subtitle( hb_title_t *title, hb_stream_t *stream, int id 
     // Copy the extradata for the subtitle track
     if (codecpar->extradata != NULL)
     {
-        subtitle->extradata = malloc(codecpar->extradata_size + 1);
-        memcpy(subtitle->extradata,
-               codecpar->extradata, codecpar->extradata_size);
-        subtitle->extradata[codecpar->extradata_size] = 0;
-        subtitle->extradata_size = codecpar->extradata_size + 1;
+        hb_set_text_extradata(&subtitle->extradata, codecpar->extradata, codecpar->extradata_size);
     }
 
     if (st->disposition & AV_DISPOSITION_DEFAULT)
@@ -5693,53 +5931,12 @@ static int ffmpeg_decmetadata( AVDictionary *m, hb_title_t *title )
     AVDictionaryEntry *tag = NULL;
     while ( (tag = av_dict_get(m, "", tag, AV_DICT_IGNORE_SUFFIX)) )
     {
-        if ( !strcasecmp( "TITLE", tag->key ) )
+        const char * hb_key;
+
+        hb_key = hb_lookup_meta_key(tag->key);
+        if (hb_key != NULL)
         {
-            hb_metadata_set_name(title->metadata, tag->value);
-            result = 1;
-        }
-        else if ( !strcasecmp( "ARTIST", tag->key ) )
-        {
-            hb_metadata_set_artist(title->metadata, tag->value);
-            result = 1;
-        }
-        else if ( !strcasecmp( "DIRECTOR", tag->key ) ||
-                  !strcasecmp( "album_artist", tag->key ) )
-        {
-            hb_metadata_set_album_artist(title->metadata, tag->value);
-            result = 1;
-        }
-        else if ( !strcasecmp( "COMPOSER", tag->key ) )
-        {
-            hb_metadata_set_composer(title->metadata, tag->value);
-            result = 1;
-        }
-        else if ( !strcasecmp( "DATE_RELEASED", tag->key ) ||
-                  !strcasecmp( "date", tag->key ) )
-        {
-            hb_metadata_set_release_date(title->metadata, tag->value);
-            result = 1;
-        }
-        else if ( !strcasecmp( "SUMMARY", tag->key ) ||
-                  !strcasecmp( "comment", tag->key ) )
-        {
-            hb_metadata_set_comment(title->metadata, tag->value);
-            result = 1;
-        }
-        else if ( !strcasecmp( "GENRE", tag->key ) )
-        {
-            hb_metadata_set_genre(title->metadata, tag->value);
-            result = 1;
-        }
-        else if ( !strcasecmp( "DESCRIPTION", tag->key ) )
-        {
-            hb_metadata_set_description(title->metadata, tag->value);
-            result = 1;
-        }
-        else if ( !strcasecmp( "SYNOPSIS", tag->key ) )
-        {
-            hb_metadata_set_long_description(title->metadata, tag->value);
-            result = 1;
+            hb_update_meta_dict(title->metadata->dict, hb_key, tag->value);
         }
     }
     return result;
@@ -5762,12 +5959,15 @@ static hb_title_t *ffmpeg_title_scan( hb_stream_t *stream, hb_title_t *title )
     if (dot_term)
         *dot_term = '\0';
 
-    uint64_t dur = ic->duration * 90000 / AV_TIME_BASE;
-    title->duration = dur;
-    dur /= 90000;
-    title->hours    = dur / 3600;
-    title->minutes  = ( dur % 3600 ) / 60;
-    title->seconds  = dur % 60;
+    if (ic->duration > 0)
+    {
+        uint64_t dur = ic->duration * 90000 / AV_TIME_BASE;
+        title->duration = dur;
+        dur /= 90000;
+        title->hours    = dur / 3600;
+        title->minutes  = ( dur % 3600 ) / 60;
+        title->seconds  = dur % 60;
+    }
 
     // set the title to decode the first video stream in the file
     title->demuxer = HB_NULL_DEMUXER;
@@ -5783,13 +5983,13 @@ static hb_title_t *ffmpeg_title_scan( hb_stream_t *stream, hb_title_t *title )
              title->video_codec == 0 )
         {
             AVCodecParameters *codecpar = st->codecpar;
-            // Check for unsupported color space.
+            // Check for unsupported pixel formats.
             // Exclude 'NONE' from check since we may not know this
             // information yet.
             if ( codecpar->format != AV_PIX_FMT_NONE &&
                  !sws_isSupportedInput( codecpar->format ) )
             {
-                hb_log( "ffmpeg_title_scan: Unsupported color space (%d)",
+                hb_log( "ffmpeg_title_scan: Unsupported pixel format (%d)",
                         codecpar->format );
                 continue;
             }
@@ -5803,9 +6003,9 @@ static hb_title_t *ffmpeg_title_scan( hb_stream_t *stream, hb_title_t *title )
             }
 
             int j;
-            for (j = 0; j < st->nb_side_data; j++)
+            for (j = 0; j < codecpar->nb_coded_side_data; j++)
             {
-                AVPacketSideData sd = st->side_data[j];
+                AVPacketSideData sd = codecpar->coded_side_data[j];
                 switch (sd.type)
                 {
                     case AV_PKT_DATA_DISPLAYMATRIX:
@@ -5844,6 +6044,18 @@ static hb_title_t *ffmpeg_title_scan( hb_stream_t *stream, hb_title_t *title )
                         title->coll.max_fall = coll->MaxFALL;
                         break;
                     }
+                    case AV_PKT_DATA_AMBIENT_VIEWING_ENVIRONMENT:
+                    {
+                        AVAmbientViewingEnvironment *ambient = (AVAmbientViewingEnvironment *)sd.data;
+                        title->ambient = hb_ambient_ff_to_hb(*ambient);
+                        break;
+                    }
+                    case AV_PKT_DATA_DOVI_CONF:
+                    {
+                        AVDOVIDecoderConfigurationRecord *dovi = (AVDOVIDecoderConfigurationRecord *)sd.data;
+                        title->dovi = hb_dovi_ff_to_hb(*dovi);
+                        break;
+                    }
                     default:
                         break;
                 }
@@ -5856,7 +6068,10 @@ static hb_title_t *ffmpeg_title_scan( hb_stream_t *stream, hb_title_t *title )
             // title->video_timebase.den = st->time_base.den;
             title->video_timebase.num = 1;
             title->video_timebase.den = 90000;
-            if (ic->iformat->raw_codec_id != AV_CODEC_ID_NONE)
+
+            // If neither the start_time neither the duration is set,
+            // it's probably a raw video with no timestamps
+            if (st->start_time == AV_NOPTS_VALUE && st->duration == AV_NOPTS_VALUE)
             {
                 title->flags |= HBTF_RAW_VIDEO;
             }
@@ -5875,9 +6090,16 @@ static hb_title_t *ffmpeg_title_scan( hb_stream_t *stream, hb_title_t *title )
             add_ffmpeg_attachment( title, stream, i );
         }
     }
+    find_ffmpeg_fallback_audio(title);
 
     title->container_name = strdup( ic->iformat->name );
     title->data_rate = ic->bit_rate;
+
+    iconv_t iconv_context;
+    iconv_context = iconv_open("utf-8", "utf-8");
+
+    size_t utf8_buf_size = 2048;
+    char *utf8_buf = malloc(utf8_buf_size);
 
     hb_deep_log( 2, "Found ffmpeg %d chapters, container=%s", ic->nb_chapters, ic->iformat->name );
 
@@ -5916,10 +6138,29 @@ static hb_title_t *ffmpeg_title_scan( hb_stream_t *stream, hb_title_t *title )
                 chapter->seconds = ( seconds % 60 );
 
                 tag = av_dict_get( m->metadata, "title", NULL, 0 );
+
+                // Detect if the chapter title is a valid UTF-8 string
+                char *p, *q;
+                size_t in_size, out_size, retval;
+
+                p = tag->value;
+                q = utf8_buf;
+
+                in_size = strlen(tag->value);
+                out_size = in_size;
+
+                if (utf8_buf_size < in_size)
+                {
+                    utf8_buf = realloc(utf8_buf, in_size);
+                }
+
+                retval = iconv(iconv_context, &p, &in_size, &q, &out_size);
+                int valid = retval != (size_t) -1;
+
                 /* Ignore generic chapter names set by MakeMKV
                  * ("Chapter 00" etc.).
                  * Our default chapter names are better. */
-                if( tag && tag->value && tag->value[0] &&
+                if( valid && tag && tag->value && tag->value[0] &&
                     ( strncmp( "Chapter ", tag->value, 8 ) ||
                       strlen( tag->value ) > 11 ) )
                 {
@@ -5928,7 +6169,7 @@ static hb_title_t *ffmpeg_title_scan( hb_stream_t *stream, hb_title_t *title )
                 else
                 {
                     char chapter_title[80];
-                    sprintf( chapter_title, "Chapter %d", chapter->index );
+                    snprintf( chapter_title, sizeof(chapter_title), "Chapter %d", chapter->index );
                     hb_chapter_set_title( chapter, chapter_title );
                 }
 
@@ -5939,6 +6180,9 @@ static hb_title_t *ffmpeg_title_scan( hb_stream_t *stream, hb_title_t *title )
                 hb_list_add( title->list_chapter, chapter );
             }
     }
+
+    iconv_close(iconv_context);
+    free(utf8_buf);
 
     /*
      * Fill the metadata.
@@ -5978,7 +6222,7 @@ static int ffmpeg_is_keyframe( hb_stream_t *stream )
             // XXX the VC1 codec doesn't mark key frames so to get previews
             // we do it ourselves here. The decoder gets messed up if it
             // doesn't get a SEQ header first so we consider that to be a key frame.
-            pkt = stream->ffmpeg_pkt.data;
+            pkt = stream->ffmpeg_pkt->data;
             if ( !pkt[0] && !pkt[1] && pkt[2] == 1 && pkt[3] == 0x0f )
                 return 1;
 
@@ -5993,7 +6237,7 @@ static int ffmpeg_is_keyframe( hb_stream_t *stream )
             // depending on whether it's main or advanced profile then whether
             // there are bframes or not so we have to look at the sequence
             // header to get that.
-            pkt = stream->ffmpeg_pkt.data;
+            pkt = stream->ffmpeg_pkt->data;
             uint8_t *seqhdr = stream->ffmpeg_ic->streams[stream->ffmpeg_video_id]->codecpar->extradata;
             int pshift = 2;
             if ( ( seqhdr[3] & 0x02 ) == 0 )
@@ -6011,7 +6255,7 @@ static int ffmpeg_is_keyframe( hb_stream_t *stream )
         default:
             break;
     }
-    return ( stream->ffmpeg_pkt.flags & AV_PKT_FLAG_KEY );
+    return ( stream->ffmpeg_pkt->flags & AV_PKT_FLAG_KEY );
 }
 
 hb_buffer_t * hb_ffmpeg_read( hb_stream_t *stream )
@@ -6020,7 +6264,7 @@ hb_buffer_t * hb_ffmpeg_read( hb_stream_t *stream )
     hb_buffer_t * buf;
 
   again:
-    if ( ( err = av_read_frame( stream->ffmpeg_ic, &stream->ffmpeg_pkt )) < 0 )
+    if ( ( err = av_read_frame( stream->ffmpeg_ic, stream->ffmpeg_pkt )) < 0 )
     {
         // av_read_frame can return EAGAIN.  In this case, it expects
         // to be called again to get more data.
@@ -6031,7 +6275,7 @@ hb_buffer_t * hb_ffmpeg_read( hb_stream_t *stream )
         // XXX the following conditional is to handle avi files that
         // use M$ 'packed b-frames' and occasionally have negative
         // sizes for the null frames these require.
-        if ( err != AVERROR(ENOMEM) || stream->ffmpeg_pkt.size >= 0 )
+        if ( err != AVERROR(ENOMEM) || stream->ffmpeg_pkt->size >= 0 )
         {
             // error or eof
             if (err != AVERROR_EOF)
@@ -6044,7 +6288,7 @@ hb_buffer_t * hb_ffmpeg_read( hb_stream_t *stream )
             return NULL;
         }
     }
-    if ( stream->ffmpeg_pkt.stream_index == stream->ffmpeg_video_id )
+    if ( stream->ffmpeg_pkt->stream_index == stream->ffmpeg_video_id )
     {
         if ( stream->need_keyframe )
         {
@@ -6054,15 +6298,15 @@ hb_buffer_t * hb_ffmpeg_read( hb_stream_t *stream )
             // or we've looked through 50 video frames without finding one.
             if ( ! ffmpeg_is_keyframe( stream ) && ++stream->need_keyframe < 50 )
             {
-                av_packet_unref(&stream->ffmpeg_pkt);
+                av_packet_unref(stream->ffmpeg_pkt);
                 goto again;
             }
             stream->need_keyframe = 0;
         }
         ++stream->frames;
     }
-    AVStream *s = stream->ffmpeg_ic->streams[stream->ffmpeg_pkt.stream_index];
-    if ( stream->ffmpeg_pkt.size <= 0 )
+    AVStream *s = stream->ffmpeg_ic->streams[stream->ffmpeg_pkt->stream_index];
+    if ( stream->ffmpeg_pkt->size <= 0 )
     {
         // M$ "invalid and inefficient" packed b-frames require 'null frames'
         // following them to preserve the timing (since the packing puts two
@@ -6075,10 +6319,10 @@ hb_buffer_t * hb_ffmpeg_read( hb_stream_t *stream )
     else
     {
         // sometimes we get absurd sizes from ffmpeg
-        if ( stream->ffmpeg_pkt.size >= (1 << 27) )
+        if ( stream->ffmpeg_pkt->size >= (1 << 27) )
         {
-            hb_log( "ffmpeg_read: pkt too big: %d bytes", stream->ffmpeg_pkt.size );
-            av_packet_unref(&stream->ffmpeg_pkt);
+            hb_log( "ffmpeg_read: pkt too big: %d bytes", stream->ffmpeg_pkt->size );
+            av_packet_unref(stream->ffmpeg_pkt);
             return hb_ffmpeg_read( stream );
         }
         switch (s->codecpar->codec_type)
@@ -6087,22 +6331,22 @@ hb_buffer_t * hb_ffmpeg_read( hb_stream_t *stream )
                 // Some ffmpeg subtitle decoders expect a null terminated
                 // string, but the null is not included in the packet size.
                 // WTF ffmpeg.
-                buf = hb_buffer_init(stream->ffmpeg_pkt.size + 1);
-                memcpy(buf->data, stream->ffmpeg_pkt.data,
-                                  stream->ffmpeg_pkt.size);
-                buf->data[stream->ffmpeg_pkt.size] = 0;
-                buf->size = stream->ffmpeg_pkt.size;
+                buf = hb_buffer_init(stream->ffmpeg_pkt->size + 1);
+                memcpy(buf->data, stream->ffmpeg_pkt->data,
+                                  stream->ffmpeg_pkt->size);
+                buf->data[stream->ffmpeg_pkt->size] = 0;
+                buf->size = stream->ffmpeg_pkt->size;
                 break;
             default:
-                buf = hb_buffer_init(stream->ffmpeg_pkt.size);
-                memcpy(buf->data, stream->ffmpeg_pkt.data,
-                                  stream->ffmpeg_pkt.size);
+                buf = hb_buffer_init(stream->ffmpeg_pkt->size);
+                memcpy(buf->data, stream->ffmpeg_pkt->data,
+                                  stream->ffmpeg_pkt->size);
                 break;
         }
 
         const uint8_t *palette;
-        int size;
-        palette = av_packet_get_side_data(&stream->ffmpeg_pkt,
+        size_t size;
+        palette = av_packet_get_side_data(stream->ffmpeg_pkt,
                                           AV_PKT_DATA_PALETTE, &size);
         if (palette != NULL)
         {
@@ -6110,19 +6354,19 @@ hb_buffer_t * hb_ffmpeg_read( hb_stream_t *stream )
             memcpy( buf->palette->data, palette, size );
         }
     }
-    if (stream->ffmpeg_pkt.flags & AV_PKT_FLAG_DISCARD)
+    if (stream->ffmpeg_pkt->flags & AV_PKT_FLAG_DISCARD)
     {
         buf->s.flags |= HB_FLAG_DISCARD;
     }
-    buf->s.id = stream->ffmpeg_pkt.stream_index;
+    buf->s.id = stream->ffmpeg_pkt->stream_index;
 
     // compute a conversion factor to go from the ffmpeg
     // timebase for the stream to HB's 90kHz timebase.
     double tsconv = (double)90000. * s->time_base.num / s->time_base.den;
     int64_t offset = 90000LL * ffmpeg_initial_timestamp(stream) / AV_TIME_BASE;
 
-    buf->s.start = av_to_hb_pts(stream->ffmpeg_pkt.pts, tsconv, offset);
-    buf->s.renderOffset = av_to_hb_pts(stream->ffmpeg_pkt.dts, tsconv, offset);
+    buf->s.start = av_to_hb_pts(stream->ffmpeg_pkt->pts, tsconv, offset);
+    buf->s.renderOffset = av_to_hb_pts(stream->ffmpeg_pkt->dts, tsconv, offset);
     if ( buf->s.renderOffset >= 0 && buf->s.start == AV_NOPTS_VALUE )
     {
         buf->s.start = buf->s.renderOffset;
@@ -6140,7 +6384,7 @@ hb_buffer_t * hb_ffmpeg_read( hb_stream_t *stream )
              * libav avcodec_decode_video2() needs AVPacket flagged with AV_PKT_FLAG_KEY
              * for some codecs. For example, sequence of PNG in a mov container.
              */
-            if (stream->ffmpeg_pkt.flags & AV_PKT_FLAG_KEY)
+            if (stream->ffmpeg_pkt->flags & AV_PKT_FLAG_KEY)
             {
                 buf->s.flags |= HB_FLAG_FRAMETYPE_KEY;
                 buf->s.frametype = HB_FRAME_I;
@@ -6154,7 +6398,7 @@ hb_buffer_t * hb_ffmpeg_read( hb_stream_t *stream )
         case AVMEDIA_TYPE_SUBTITLE:
         {
             // Fill out stop and duration for subtitle packets
-            int64_t pkt_duration = stream->ffmpeg_pkt.duration;
+            int64_t pkt_duration = stream->ffmpeg_pkt->duration;
             if (pkt_duration != AV_NOPTS_VALUE)
             {
                 buf->s.duration = av_to_hb_pts(pkt_duration, tsconv, 0);
@@ -6180,7 +6424,7 @@ hb_buffer_t * hb_ffmpeg_read( hb_stream_t *stream )
      * (roughly 3 million years at our 90KHz clock rate) so the test
      * below handles both the chapters & no chapters case.
      */
-    if ( stream->ffmpeg_pkt.stream_index == stream->ffmpeg_video_id &&
+    if ( stream->ffmpeg_pkt->stream_index == stream->ffmpeg_video_id &&
          buf->s.start >= stream->chapter_end )
     {
         hb_chapter_t *chapter = hb_list_item( stream->title->list_chapter,
@@ -6204,7 +6448,7 @@ hb_buffer_t * hb_ffmpeg_read( hb_stream_t *stream )
     } else {
         buf->s.new_chap = 0;
     }
-    av_packet_unref(&stream->ffmpeg_pkt);
+    av_packet_unref(stream->ffmpeg_pkt);
     return buf;
 }
 

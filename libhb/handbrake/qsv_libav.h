@@ -116,7 +116,8 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #include <stdint.h>
 #include <string.h>
-#include "mfx/mfxvideo.h"
+#include "vpl/mfxvideo.h"
+#include "vpl/mfxdispatcher.h"
 #include "libavutil/mem.h"
 #include "libavutil/time.h"
 #include "libavcodec/avcodec.h"
@@ -161,12 +162,14 @@ THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 #define HB_QSV_SURFACE_NUM              80
 #define HB_QSV_SYNC_NUM                 HB_QSV_SURFACE_NUM*3/4
-#define HB_QSV_BUF_SIZE_DEFAULT         4096*2160*10
 #define HB_QSV_JOB_SIZE_DEFAULT         10
 #define HB_QSV_SYNC_TIME_DEFAULT        10000
 // see hb_qsv_get_free_sync, hb_qsv_get_free_surface , 100 if usleep(10*1000)(10ms) == 1 sec
 #define HB_QSV_REPEAT_NUM_DEFAULT      100
 #define HB_QSV_ASYNC_DEPTH_DEFAULT     4
+
+#define HB_QSV_AVC_DECODER_WIDTH_MAX   4096
+#define HB_QSV_AVC_DECODER_HEIGHT_MAX  4096
 
 // version of MSDK/QSV API currently used
 #define HB_QSV_MSDK_VERSION_MAJOR  1
@@ -212,7 +215,6 @@ typedef struct QSVFrame {
 
 #define HB_QSV_POOL_FFMPEG_SURFACE_SIZE (64)
 #define HB_QSV_POOL_SURFACE_SIZE (64)
-#define HB_QSV_POOL_ENCODER_SIZE (8)
 
 typedef struct HBQSVFramesContext {
     AVBufferRef *hw_frames_ctx;
@@ -277,7 +279,6 @@ typedef struct hb_qsv_space {
     mfxFrameAllocResponse response;
     mfxFrameAllocRequest request[2];    // [0] - in, [1] - out, if needed
 
-    mfxExtOpaqueSurfaceAlloc ext_opaque_alloc;
     mfxExtBuffer **p_ext_params;
     uint16_t p_ext_param_num;
 
@@ -330,16 +331,26 @@ typedef struct hb_qsv_context {
 
     void *qsv_config;
 
-    int num_cpu_filters;
+    int num_sw_filters;
+    int num_hw_filters;
     int la_is_enabled;
-    int qsv_filters_are_enabled;
-    char *vpp_scale_mode;
-    char *vpp_interpolation_method;
-    char *qsv_device;
+    int qsv_hw_filters_via_video_memory_are_enabled;
+    int qsv_hw_filters_via_system_memory_are_enabled;
+    int memory_type;
+    int out_range;
+    int full_path_is_enabled;
+    const char *vpp_scale_mode;
+    const char *vpp_interpolation_method;
     int dx_index;
     AVBufferRef *hb_hw_device_ctx;
+    AVBufferRef *hb_ffmpeg_qsv_hw_frames_ctx;
     HBQSVFramesContext *hb_dec_qsv_frames_ctx;
     HBQSVFramesContext *hb_vpp_qsv_frames_ctx;
+
+    mfxHDL device_manager_handle;
+    mfxHandleType device_manager_handle_type;
+    void *device_context;
+    hb_display_t *display;
 } hb_qsv_context;
 
 typedef enum {
@@ -366,7 +377,6 @@ typedef struct hb_qsv_alloc_buffer {
 typedef struct hb_qsv_allocators_space {
     hb_qsv_space *space;
     mfxFrameAllocator frame_alloc;
-    mfxBufferAllocator buffer_alloc;
 } hb_qsv_allocators_space;
 
 typedef struct hb_qsv_config {
@@ -494,8 +504,7 @@ int hb_qsv_get_free_surface(hb_qsv_space *, hb_qsv_context *, mfxFrameInfo *,
                      hb_qsv_split);
 int hb_qsv_get_free_encode_task(hb_qsv_list *);
 
-int av_is_qsv_available(mfxIMPL, mfxVersion *);
-void hb_qsv_wait_on_sync(hb_qsv_context *, hb_qsv_stage *);
+int hb_qsv_wait_on_sync(hb_qsv_context *, hb_qsv_stage *);
 
 void hb_qsv_add_context_usage(hb_qsv_context *, int);
 
@@ -505,13 +514,13 @@ void hb_qsv_pipe_list_clean(hb_qsv_list **);
 void hb_qsv_add_stagee(hb_qsv_list **, hb_qsv_stage *, int);
 hb_qsv_stage *hb_qsv_get_last_stage(hb_qsv_list *);
 hb_qsv_list *hb_qsv_pipe_by_stage(hb_qsv_list *, hb_qsv_stage *);
-void hb_qsv_flush_stages(hb_qsv_list *, hb_qsv_list **);
+void hb_qsv_flush_stages(hb_qsv_list *, hb_qsv_list **, int);
 
 void hb_qsv_dts_ordered_insert(hb_qsv_context *, int, int, int64_t, int);
 void hb_qsv_dts_pop(hb_qsv_context *);
 
 hb_qsv_stage *hb_qsv_stage_init(void);
-void hb_qsv_stage_clean(hb_qsv_stage **);
+void hb_qsv_stage_clean(hb_qsv_stage **, int);
 int hb_qsv_context_clean(hb_qsv_context *, int);
 
 int ff_qsv_is_sync_in_pipe(mfxSyncPoint *, hb_qsv_context *);

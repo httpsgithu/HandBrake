@@ -9,13 +9,10 @@
 
 namespace HandBrakeWPF.ViewModelItems.Filters
 {
-    using System.ComponentModel;
-
-    using Caliburn.Micro;
-
     using HandBrakeWPF.Services.Encode.Model;
     using HandBrakeWPF.Services.Presets.Model;
     using HandBrakeWPF.Services.Scan.Model;
+    using HandBrakeWPF.ViewModels;
 
     using Action = System.Action;
 
@@ -27,7 +24,6 @@ namespace HandBrakeWPF.ViewModelItems.Filters
         {
             this.triggerTabChanged = triggerTabChanged;
             this.CurrentTask = currentTask;
-
         }
 
         public EncodeTask CurrentTask { get; private set; }
@@ -58,7 +54,6 @@ namespace HandBrakeWPF.ViewModelItems.Filters
             }
 
             this.Grayscale = preset.Task.Grayscale;
-
         }
 
         public void UpdateTask(EncodeTask task)

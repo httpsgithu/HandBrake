@@ -9,28 +9,26 @@
 
 namespace HandBrakeWPF.Views
 {
+    using System;
+
+    using HandBrakeWPF.Helpers;
     using System.Windows;
-    using System.Windows.Controls;
+    using System.Windows.Input;
 
-    using HandBrakeWPF.ViewModels;
+    using HandBrakeWPF.Commands;
 
-    /// <summary>
-    /// Interaction logic for AudioDefaultsView.xaml
-    /// </summary>
     public partial class AudioDefaultsView : Window
     {
-        /// <summary>
-        /// Initializes a new instance of the <see cref="AudioDefaultsView"/> class.
-        /// </summary>
         public AudioDefaultsView()
         {
             this.InitializeComponent();
+            this.InputBindings.Add(new InputBinding(new CloseWindowCommand(this), new KeyGesture(Key.W, ModifierKeys.Control))); // Close Window
         }
 
-        private void Apply_OnClick(object sender, RoutedEventArgs e)
+        protected override void OnSourceInitialized(EventArgs e)
         {
-            ((AudioDefaultsViewModel)DataContext).IsApplied = true;
-            this.Close();
+            base.OnSourceInitialized(e);
+            WindowHelper.SetDarkMode(this);
         }
     }
 }

@@ -9,11 +9,9 @@
 
 namespace HandBrake.Interop.Interop.Json.Presets
 {
+    using System;
     using System.Collections.Generic;
 
-    /// <summary>
-    ///     The preset.
-    /// </summary>
     public class HBPreset
     {
         public bool AlignAVStart { get; set; }
@@ -79,9 +77,9 @@ namespace HandBrake.Interop.Interop.Json.Presets
         public bool FolderOpen { get; set; }
 
         /// <summary>
-        /// Gets or sets a value indicating whether mp 4 http optimize.
+        /// Gets or sets a value indicating whether optimize.
         /// </summary>
-        public bool Mp4HttpOptimize { get; set; }
+        public bool Optimize { get; set; }
 
         /// <summary>
         /// Gets or sets a value indicating whether mp 4 i pod compatible.
@@ -89,9 +87,9 @@ namespace HandBrake.Interop.Interop.Json.Presets
         public bool Mp4iPodCompatible { get; set; }
 
         /// <summary>
-        /// Gets or sets a value indicating whether picture auto crop.
+        /// Gets or sets a value indicating whether picture loose crop.
         /// </summary>
-        public bool PictureAutoCrop { get; set; }
+        public int PictureCropMode { get; set; }
 
         /// <summary>
         /// Gets or sets the picture bottom crop.
@@ -208,16 +206,6 @@ namespace HandBrake.Interop.Interop.Json.Presets
         public bool PictureKeepRatio { get; set; }
 
         /// <summary>
-        /// Gets or sets a value indicating whether picture loose crop.
-        /// </summary>
-        public bool PictureLooseCrop { get; set; }
-
-        /// <summary>
-        /// Gets or sets the picture modulus.
-        /// </summary>
-        public int PictureModulus { get; set; }
-
-        /// <summary>
         /// Gets or sets the picture par.
         /// </summary>
         public string PicturePAR { get; set; }
@@ -247,6 +235,10 @@ namespace HandBrake.Interop.Interop.Json.Presets
         /// </summary>
         public int? PictureHeight { get; set; }
 
+        public bool PictureUseMaximumSize { get; set; }
+
+        public bool PictureAllowUpscaling { get; set; }
+
         /// <summary>
         /// Gets or sets the picture force height.
         /// </summary>
@@ -257,6 +249,18 @@ namespace HandBrake.Interop.Interop.Json.Presets
         /// </summary>
         public int PictureForceWidth { get; set; }
 
+        public string PicturePadMode { get; set; }
+
+        public int PicturePadTop { get; set; }
+
+        public int PicturePadBottom { get; set; }
+
+        public int PicturePadLeft { get; set; }
+
+        public int PicturePadRight { get; set; }
+
+        public string PicturePadColor { get; set; }
+        
         /// <summary>
         /// Gets or sets the preset description.
         /// </summary>
@@ -271,16 +275,6 @@ namespace HandBrake.Interop.Interop.Json.Presets
         /// Gets or sets the type.
         /// </summary>
         public int Type { get; set; }
-
-        /// <summary>
-        /// Gets or sets a value indicating whether uses picture filters.
-        /// </summary>
-        public bool UsesPictureFilters { get; set; }
-
-        /// <summary>
-        /// Gets or sets the uses picture settings.
-        /// </summary>
-        public int UsesPictureSettings { get; set; }
 
         /// <summary>
         /// Gets or sets a value indicating whether subtitle add cc.
@@ -393,24 +387,19 @@ namespace HandBrake.Interop.Interop.Json.Presets
         public double VideoQualitySlider { get; set; }
 
         /// <summary>
-        /// Gets or sets a value indicating whether video qsv decode.
+        /// Gets or sets a value indicating whether video multi pass.
         /// </summary>
-        public bool VideoQSVDecode { get; set; }
+        public bool VideoMultiPass { get; set; }
 
         /// <summary>
-        /// Gets or sets the video qsv async depth.
+        /// Gets or sets a value indicating whether video turbo multi pass.
         /// </summary>
-        public int VideoQSVAsyncDepth { get; set; }
+        public bool VideoTurboMultiPass { get; set; }
 
         /// <summary>
-        /// Gets or sets a value indicating whether video two pass.
+        /// Gets or sets a value indicating which dynamic metadata formats to preserve.
         /// </summary>
-        public bool VideoTwoPass { get; set; }
-
-        /// <summary>
-        /// Gets or sets a value indicating whether video turbo two pass.
-        /// </summary>
-        public bool VideoTurboTwoPass { get; set; }
+        public string VideoPasshtruHDRDynamicMetadata { get; set; }
 
         /// <summary>
         /// Gets or sets the x 264 option.
@@ -423,5 +412,7 @@ namespace HandBrake.Interop.Interop.Json.Presets
         public bool x264UseAdvancedOptions { get; set; }
 
         public bool PresetDisabled { get; set; }
+
+        public bool MetadataPassthru { get; set; }
     }
 }

@@ -1,6 +1,6 @@
 /* preset.c
 
-   Copyright (c) 2003-2021 HandBrake Team
+   Copyright (c) 2003-2024 HandBrake Team
    This file is part of the HandBrake source code
    Homepage: <http://handbrake.fr/>.
    It may be used under the terms of the GNU General Public License v2.
@@ -10,17 +10,14 @@
 #include "handbrake/preset_builtin.h"
 #include "handbrake/handbrake.h"
 #include "handbrake/hb_dict.h"
-#include "handbrake/plist.h"
 #include "handbrake/lang.h"
+#include "libavcodec/avcodec.h"
 
 #if defined(SYS_LINUX)
-#define HB_PRESET_PLIST_FILE    "ghb/presets"
 #define HB_PRESET_JSON_FILE     "ghb/presets.json"
 #elif defined(SYS_MINGW)
-#define HB_PRESET_PLIST_FILE    "HandBrake\\presets.xml"
 #define HB_PRESET_JSON_FILE     "HandBrake\\presets.json"
 #elif defined(SYS_DARWIN)
-#define HB_PRESET_PLIST_FILE    "HandBrake/UserPresets.plist"
 #define HB_PRESET_JSON_FILE     "HandBrake/UserPresets.json"
 #endif
 
@@ -399,6 +396,151 @@ static hb_dict_t * source_audio_track_used(hb_dict_t *track_dict, int track)
     return used;
 }
 
+static int audio_codec_rank(hb_audio_config_t * audio)
+{
+    switch (audio->in.codec)
+    {
+        case HB_ACODEC_DCA_HD:
+            return 4;
+        case HB_ACODEC_LPCM:
+            return 2;
+
+        default:
+        {
+            switch (audio->in.codec_param)
+            {
+                case AV_CODEC_ID_TRUEHD:
+                case AV_CODEC_ID_PCM_BLURAY:
+                    return 4;
+                case AV_CODEC_ID_EAC3:
+                case AV_CODEC_ID_AAC:
+                case AV_CODEC_ID_AAC_LATM:
+                    return 3;
+                case AV_CODEC_ID_AC3:
+                case AV_CODEC_ID_DTS:
+                    return 2;
+                case AV_CODEC_ID_MP2:
+                    return 1;
+            }
+        } break;
+    }
+    return -1;
+}
+
+static hb_audio_config_t * better_audio(hb_audio_config_t * audio_a,
+                                        hb_audio_config_t * audio_b)
+{
+    int channels_a, channels_b;
+
+    if (audio_a == NULL)
+        return audio_b;
+    if (audio_b == NULL)
+        return audio_a;
+
+    channels_a = hb_layout_get_discrete_channel_count(
+                        audio_a->in.channel_layout);
+    channels_b = hb_layout_get_discrete_channel_count(
+                        audio_b->in.channel_layout);
+    if (channels_a > channels_b)
+    {
+        return audio_a;
+    }
+    if (channels_b > channels_a)
+    {
+        return audio_b;
+    }
+    if (audio_a->in.samplerate > audio_b->in.samplerate)
+    {
+        return audio_a;
+    }
+    if (audio_b->in.samplerate > audio_a->in.samplerate)
+    {
+        return audio_b;
+    }
+    int rank_a = audio_codec_rank(audio_a);
+    int rank_b = audio_codec_rank(audio_b);
+    if (rank_a >= 0 && rank_b >= 0 && rank_a > rank_b)
+    {
+        return audio_a;
+    }
+    return audio_b;
+}
+
+static hb_audio_config_t * best_linked_audio(hb_list_t * list_audio,
+                                             hb_audio_config_t * audio,
+                                             int out_codec, int copy_mask,
+                                             int mix_channels)
+{
+    if (audio->list_linked_index == NULL)
+    {
+        return audio;
+    }
+
+    hb_audio_config_t * best_pass_audio = NULL;
+    if (out_codec == HB_ACODEC_AUTO_PASS)
+    {
+        // Autopassthru
+        if (audio->in.codec & copy_mask)
+        {
+            best_pass_audio = audio;
+        }
+    }
+    else if (out_codec & HB_ACODEC_PASS_FLAG)
+    {
+        // Specific codec passthru
+        if (audio->in.codec & out_codec)
+        {
+            best_pass_audio = audio;
+        }
+    }
+    hb_audio_config_t * best_audio = audio;
+    int count = hb_list_count(audio->list_linked_index);
+    int ii;
+    for (ii = 0; ii < count; ii++)
+    {
+        int                 linked_index;
+        hb_audio_config_t * linked_audio;
+
+        linked_index = *(int*)hb_list_item(audio->list_linked_index, ii);
+        linked_audio = hb_list_audio_config_item(list_audio, linked_index);
+        if (out_codec == HB_ACODEC_AUTO_PASS)
+        {
+            // If auto-passthru, select the best that can be passed
+            if (linked_audio->in.codec & copy_mask)
+            {
+                best_pass_audio = better_audio(linked_audio, best_pass_audio);
+            }
+        }
+        else if (out_codec & HB_ACODEC_PASS_FLAG)
+        {
+            // if passthru for a specific codec, check if either option is
+            // the requested codec
+            if (linked_audio->in.codec & out_codec)
+            {
+                best_pass_audio = better_audio(linked_audio, best_pass_audio);
+            }
+        }
+        best_audio = better_audio(linked_audio, best_audio);
+    }
+    if (best_pass_audio != NULL)
+    {
+        int channels_pass = 0;
+        int channels_enc;
+
+        channels_enc  = hb_layout_get_discrete_channel_count(
+                                best_audio->in.channel_layout);
+        channels_pass = hb_layout_get_discrete_channel_count(
+                            best_pass_audio->in.channel_layout);
+        if (channels_pass >= channels_enc ||
+            (channels_pass >= 6 && channels_pass >= mix_channels))
+        {
+            return best_pass_audio;
+        }
+    }
+
+    return best_audio;
+}
+
 // Find a source audio track matching given language
 static int find_audio_track(const hb_title_t *title,
                             const char *lang, int start, int behavior)
@@ -458,7 +600,7 @@ static int validate_audio_encoders(const hb_dict_t *preset)
         value = hb_dict_get(audio_dict, "AudioMixdown");
         if (hb_value_type(value) == HB_VALUE_TYPE_STRING)
         {
-            mix = hb_audio_encoder_get_from_name(hb_value_get_string(value));
+            mix = hb_mixdown_get_from_name(hb_value_get_string(value));
         }
         else
         {
@@ -641,20 +783,12 @@ static void add_audio_for_lang(hb_value_array_t *list, const hb_dict_t *preset,
     {
         int track_count = hb_value_array_len(list);
         char key[8];
-        snprintf(key, sizeof(key), "%d", track);
 
         count = mode && track_count ? 1 : count;
         int ii;
         for (ii = 0; ii < count; ii++)
         {
-            // Check if this source track has already been added using these
-            // same encoder settings.  If so, continue to next track.
-            hb_dict_t *used = source_audio_track_used(track_dict, ii);
-            if (hb_value_get_bool(hb_dict_get(used, key)))
-                continue;
-
             // Create new audio output track settings
-            hb_dict_t *audio_dict = hb_dict_init();
             hb_value_t *acodec_value;
             hb_dict_t *encoder_dict = hb_value_array_get(encoder_list, ii);
             int out_codec;
@@ -669,13 +803,46 @@ static void add_audio_for_lang(hb_value_array_t *list, const hb_dict_t *preset,
             {
                 out_codec = hb_value_get_int(acodec_value);
             }
+            int mix_channels = 2;
+            if (hb_dict_get(encoder_dict, "AudioMixdown") != NULL)
+            {
+                int mixdown = hb_mixdown_get_from_name(
+                              hb_dict_get_string(encoder_dict, "AudioMixdown"));
+                mix_channels = hb_mixdown_get_discrete_channel_count(mixdown);
+            }
+
+            hb_audio_config_t * aconfig;
+
+            aconfig = hb_list_audio_config_item(title->list_audio, track);
+            if (behavior != 2)
+            {
+                hb_audio_config_t * linked_aconfig;
+                linked_aconfig = best_linked_audio(title->list_audio, aconfig,
+                                                   out_codec, copy_mask,
+                                                   mix_channels);
+                if (aconfig != linked_aconfig)
+                {
+                    hb_log("Substituting linked audio track %d for track %d\n",
+                            linked_aconfig->index, aconfig->index);
+                    aconfig = linked_aconfig;
+                }
+            }
+
+            // Check if this source track has already been added using these
+            // same encoder settings.  If so, continue to next track.
+            snprintf(key, sizeof(key), "%d", aconfig->index);
+            hb_dict_t *used = source_audio_track_used(track_dict, ii);
+            if (hb_value_get_bool(hb_dict_get(used, key)))
+            {
+                continue;
+            }
+
             // Save the encoder value before sanitizing.  This value is
             // useful to the frontends.
+            hb_dict_t *audio_dict = hb_dict_init();
             hb_dict_set(audio_dict, "PresetEncoder",
                 hb_value_string(hb_audio_encoder_get_short_name(out_codec)));
 
-            hb_audio_config_t *aconfig;
-            aconfig = hb_list_audio_config_item(title->list_audio, track);
             out_codec = sanitize_audio_codec(aconfig->in.codec, out_codec,
                                              copy_mask, fallback, mux);
             if (out_codec == HB_ACODEC_NONE || HB_ACODEC_INVALID)
@@ -683,7 +850,7 @@ static void add_audio_for_lang(hb_value_array_t *list, const hb_dict_t *preset,
                 hb_value_free(&audio_dict);
                 continue;
             }
-            hb_dict_set(audio_dict, "Track", hb_value_int(track));
+            hb_dict_set(audio_dict, "Track", hb_value_int(aconfig->index));
             hb_dict_set(audio_dict, "Encoder", hb_value_string(
                         hb_audio_encoder_get_short_name(out_codec)));
             const char * name = hb_dict_get_string(encoder_dict, "AudioTrackName");
@@ -970,10 +1137,15 @@ static void add_subtitle_for_lang(hb_value_array_t *list, hb_title_t *title,
         make_default = (!burn && behavior->make_default) ||
                        (!has_default_subtitle(list) &&
                         subtitle->config.default_track);
+
+        if (!behavior->one_burned || hb_subtitle_can_pass(subtitle->source, mux))
+        {
+            add_subtitle(list, t, make_default, 0 /*!force*/, burn, subtitle->name);
+        }
+
         behavior->burn_first &= !burn;
         behavior->one_burned |= burn;
         behavior->used[t] = 1;
-        add_subtitle(list, t, make_default, 0 /*!force*/, burn, subtitle->name);
     }
 }
 
@@ -1123,7 +1295,7 @@ int hb_preset_job_add_subtitles(hb_handle_t *h, int title_index,
     if (first_audio_lang != NULL &&
         foreign_first_audio && strncmp(first_audio_lang, pref_lang, 4))
     {
-        // First audio lang does not match the preferred subittle lang.
+        // First audio lang does not match the preferred subtitle lang.
         // Preset says to add pref lang subtitle.
         // Foreign audio search is not necessary since entire audio track
         // is foreign.
@@ -1259,10 +1431,18 @@ int hb_preset_apply_filters(const hb_dict_t *preset, hb_dict_t *job_dict)
     hb_video_framerate_get_limits(&clock_min, &clock_max, &clock);
 
     // Create new filters
-    filters_dict = hb_dict_init();
-    hb_dict_set(job_dict, "Filters", filters_dict);
-    filter_list = hb_value_array_init();
-    hb_dict_set(filters_dict, "FilterList", filter_list);
+    filters_dict = hb_dict_get(job_dict, "Filters");
+    if (filters_dict == NULL)
+    {
+        filters_dict = hb_dict_init();
+        hb_dict_set(job_dict, "Filters", filters_dict);
+    }
+    filter_list = hb_dict_get(filters_dict, "FilterList");
+    if (filter_list == NULL)
+    {
+        filter_list = hb_value_array_init();
+        hb_dict_set(filters_dict, "FilterList", filter_list);
+    }
 
     // Detelecine filter
     hb_value_t *detel_val = hb_dict_get(preset, "PictureDetelecine");
@@ -1340,7 +1520,11 @@ int hb_preset_apply_filters(const hb_dict_t *preset, hb_dict_t *job_dict)
         }
         else if (!strcasecmp(deint_filter, "deinterlace"))
         {
-            filter_id = HB_FILTER_DEINTERLACE;
+            filter_id = HB_FILTER_YADIF;
+        }
+        else if (!strcasecmp(deint_filter, "bwdif"))
+        {
+            filter_id = HB_FILTER_BWDIF;
         }
         else
         {
@@ -1538,7 +1722,9 @@ int hb_preset_apply_filters(const hb_dict_t *preset, hb_dict_t *job_dict)
             hb_error("Invalid rotate filter settings (%s)", rotate);
             return -1;
         }
-        else if (!hb_dict_get_bool(filter_settings, "disable"))
+        else if (!hb_dict_get_bool(filter_settings, "disable") &&
+                 (hb_dict_get_int(filter_settings, "angle") != 0 ||
+                  hb_dict_get_bool(filter_settings, "hflip")))
         {
             filter_dict = hb_dict_init();
             hb_dict_set(filter_dict, "ID", hb_value_int(HB_FILTER_ROTATE));
@@ -1560,15 +1746,77 @@ int hb_preset_apply_filters(const hb_dict_t *preset, hb_dict_t *job_dict)
         hb_add_filter2(filter_list, filter_dict);
     }
 
-    // Pad filter
-    char *pad = hb_value_get_string_xform(hb_dict_get(preset, "PicturePad"));
-    if (pad != NULL)
+    // Pad filter requires knowing crop/scale settings
+    hb_dict_t * scale_filter, * scale_settings = NULL;
+    scale_filter = hb_filter_dict_find(filter_list, HB_FILTER_CROP_SCALE);
+    if (scale_filter != NULL)
+    {
+        scale_settings = hb_dict_get(scale_filter, "Settings");
+    }
+
+    char       * pad_params = NULL;
+    const char * pad_mode = hb_dict_get_string(preset, "PicturePadMode");
+    if (pad_mode != NULL && strcmp(pad_mode, "none"))
+    {
+        // Preset values used by the GUI and built-in presets
+        int pad[4] = {0,};
+        const char * color;
+
+        if (!strcmp(pad_mode, "custom"))
+        {
+            pad[0] = hb_dict_get_int(preset, "PicturePadTop");
+            pad[1] = hb_dict_get_int(preset, "PicturePadBottom");
+            pad[2] = hb_dict_get_int(preset, "PicturePadLeft");
+            pad[3] = hb_dict_get_int(preset, "PicturePadRight");
+        }
+
+        if (scale_settings != NULL)
+        {
+            int fillwidth, fillheight;
+
+            int width     = hb_dict_get_int(scale_settings, "width");
+            int height    = hb_dict_get_int(scale_settings, "height");
+            int maxWidth  = hb_dict_get_int(preset, "PictureWidth");
+            int maxHeight = hb_dict_get_int(preset, "PictureHeight");
+
+            fillwidth  = fillheight  = !strcmp(pad_mode, "fill");
+            fillheight = fillheight || !strcmp(pad_mode, "letterbox");
+            fillwidth  = fillwidth  || !strcmp(pad_mode, "pillarbox");
+
+            if (fillwidth && maxWidth > 0)
+            {
+                pad[2] = (maxWidth  - width) / 2;
+                pad[3] =  maxWidth  - width - pad[2];
+            }
+            if (fillheight && maxHeight > 0)
+            {
+                pad[0] = (maxHeight - height) / 2;
+                pad[1] =  maxHeight - height - pad[0];
+            }
+        }
+        color  = hb_dict_get_string(preset, "PicturePadColor");
+        if (color == NULL)
+        {
+            color = "black";
+        }
+
+        pad_params =
+            hb_strdup_printf("top=%d:bottom=%d:left=%d:right=%d:color=%s",
+                             pad[0], pad[1], pad[2], pad[3], color);
+    }
+    else
+    {
+        // Preset value used by the CLI
+        pad_params =
+            hb_value_get_string_xform(hb_dict_get(preset, "PicturePad"));
+    }
+    if (pad_params != NULL)
     {
         filter_settings = hb_generate_filter_settings(HB_FILTER_PAD,
-                                                      NULL, NULL, pad);
+                                                      NULL, NULL, pad_params);
         if (filter_settings == NULL)
         {
-            hb_error("Invalid pad filter settings (%s)", pad);
+            hb_error("Invalid pad filter settings (%s)", pad_params);
             return -1;
         }
         else if (!hb_dict_get_bool(filter_settings, "disable"))
@@ -1582,8 +1830,8 @@ int hb_preset_apply_filters(const hb_dict_t *preset, hb_dict_t *job_dict)
         {
             hb_value_free(&filter_settings);
         }
+        free(pad_params);
     }
-    free(pad);
 
     // Colorspace filter
     const char *colorspace = hb_value_get_string(hb_dict_get(preset, "PictureColorspacePreset"));
@@ -1761,7 +2009,7 @@ int hb_preset_apply_video(const hb_dict_t *preset, hb_dict_t *job_dict)
     }
 
     vqtype = hb_value_get_int(hb_dict_get(preset, "VideoQualityType"));
-    if (vqtype == 2)        // Constant quality
+    if (vqtype == 2 && hb_video_quality_is_supported(vcodec))   // Constant quality
     {
         hb_dict_set(video_dict, "Quality",
                     hb_value_xform(hb_dict_get(preset, "VideoQualitySlider"),
@@ -1773,18 +2021,12 @@ int hb_preset_apply_video(const hb_dict_t *preset, hb_dict_t *job_dict)
         hb_dict_set(video_dict, "Bitrate",
                     hb_value_xform(hb_dict_get(preset, "VideoAvgBitrate"),
                                    HB_VALUE_TYPE_INT));
-        hb_dict_set(video_dict, "TwoPass",
-                    hb_value_xform(hb_dict_get(preset, "VideoTwoPass"),
-                                   HB_VALUE_TYPE_BOOL));
-        hb_dict_set(video_dict, "Turbo",
-                    hb_value_xform(hb_dict_get(preset, "VideoTurboTwoPass"),
-                                   HB_VALUE_TYPE_BOOL));
         hb_dict_remove(video_dict, "Quality");
     }
     else
     {
         value = hb_dict_get(preset, "VideoQualitySlider");
-        if (value != NULL && hb_value_get_double(value) >= 0)
+        if (value != NULL && hb_value_get_double(value) >= 0 && hb_video_quality_is_supported(vcodec))
         {
             hb_dict_set(video_dict, "Quality",
                         hb_value_xform(value, HB_VALUE_TYPE_DOUBLE));
@@ -1795,20 +2037,49 @@ int hb_preset_apply_video(const hb_dict_t *preset, hb_dict_t *job_dict)
             hb_dict_set(video_dict, "Bitrate",
                         hb_value_xform(hb_dict_get(preset, "VideoAvgBitrate"),
                                        HB_VALUE_TYPE_INT));
-            hb_dict_set(video_dict, "TwoPass",
-                        hb_value_xform(hb_dict_get(preset, "VideoTwoPass"),
-                                       HB_VALUE_TYPE_BOOL));
-            hb_dict_set(video_dict, "Turbo",
-                        hb_value_xform(hb_dict_get(preset, "VideoTurboTwoPass"),
-                                       HB_VALUE_TYPE_BOOL));
             hb_dict_remove(video_dict, "Quality");
         }
     }
+
+    if (hb_video_multipass_is_supported(vcodec, hb_dict_get(video_dict, "Quality") != NULL))
+    {
+        hb_dict_set(video_dict, "MultiPass",
+            hb_value_xform(hb_dict_get(preset, "VideoMultiPass"),
+                            HB_VALUE_TYPE_BOOL));
+        hb_dict_set(video_dict, "Turbo",
+                    hb_value_xform(hb_dict_get(preset, "VideoTurboMultiPass"),
+                                    HB_VALUE_TYPE_BOOL));
+    }
+
+    if ((value = hb_dict_get(preset, "VideoPasshtruHDRDynamicMetadata")) != NULL)
+    {
+        int hdr_dynamic_metadata = HB_HDR_DYNAMIC_METADATA_ALL;
+        if (!strcasecmp(hb_value_get_string(value), "off"))
+        {
+            hdr_dynamic_metadata = HB_HDR_DYNAMIC_METADATA_NONE;
+        }
+        else if (!strcasecmp(hb_value_get_string(value), "hdr10plus"))
+        {
+            hdr_dynamic_metadata = HB_HDR_DYNAMIC_METADATA_HDR10PLUS;
+        }
+        else if (!strcasecmp(hb_value_get_string(value), "dolbyvision"))
+        {
+            hdr_dynamic_metadata = HB_HDR_DYNAMIC_METADATA_DOVI;
+        }
+        hb_dict_set(video_dict, "PasshtruHDRDynamicMetadata", hb_value_int(hdr_dynamic_metadata));
+    }
+
+    if ((value = hb_dict_get(preset, "VideoHWDecode")) != NULL)
+    {
+        hb_dict_set(video_dict, "HardwareDecode", hb_value_xform(value, HB_VALUE_TYPE_INT));
+    }
+    
     qsv = hb_dict_get(video_dict, "QSV");
     if (qsv == NULL)
     {
         qsv = hb_dict_init();
         hb_dict_set(video_dict, "QSV", qsv);
+        qsv = hb_dict_get(video_dict, "QSV");
     }
     if ((value = hb_dict_get(preset, "VideoQSVDecode")) != NULL)
     {
@@ -1820,7 +2091,11 @@ int hb_preset_apply_video(const hb_dict_t *preset, hb_dict_t *job_dict)
         hb_dict_set(qsv, "AsyncDepth",
                     hb_value_xform(value, HB_VALUE_TYPE_INT));
     }
-
+    if ((value = hb_dict_get(preset, "VideoQSVAdapterIndex")) != NULL)
+    {
+        hb_dict_set(qsv, "AdapterIndex",
+                    hb_value_xform(value, HB_VALUE_TYPE_INT));
+    }
     return 0;
 }
 
@@ -1857,22 +2132,23 @@ int hb_preset_apply_mux(const hb_dict_t *preset, hb_dict_t *job_dict)
     hb_dict_set(dest_dict, "InlineParameterSets",
                 hb_value_xform(hb_dict_get(preset, "InlineParameterSets"),
                                HB_VALUE_TYPE_BOOL));
-    if (mux & HB_MUX_MASK_MP4)
+    if (mux)
     {
-        hb_dict_t *mp4_dict = hb_dict_init();
-        hb_dict_set(mp4_dict, "Mp4Optimize",
-                    hb_value_xform(hb_dict_get(preset, "Mp4HttpOptimize"),
+        hb_dict_t *options_dict = hb_dict_init();
+        hb_dict_set(options_dict, "Optimize",
+                    hb_value_xform(hb_dict_get(preset, "Optimize"),
                                    HB_VALUE_TYPE_BOOL));
-        hb_dict_set(mp4_dict, "IpodAtom",
+        hb_dict_set(options_dict, "IpodAtom",
                     hb_value_xform(hb_dict_get(preset, "Mp4iPodCompatible"),
                                    HB_VALUE_TYPE_BOOL));
-        hb_dict_set(dest_dict, "Mp4Options", mp4_dict);
+        hb_dict_set(dest_dict, "Options", options_dict);
     }
 
     return 0;
 }
 
-int hb_preset_apply_title(hb_handle_t *h, int title_index,
+
+int hb_preset_apply_dimensions(hb_handle_t *h, int title_index,
                           const hb_dict_t *preset, hb_dict_t *job_dict)
 {
     // Apply preset settings  that requires the title
@@ -1880,56 +2156,95 @@ int hb_preset_apply_title(hb_handle_t *h, int title_index,
     if (title == NULL)
         return -1;
 
-    int chapters = hb_value_get_bool(hb_dict_get(preset, "ChapterMarkers"));
-    if (hb_list_count(title->list_chapter) <= 1)
-        chapters = 0;
+    hb_dict_t        * filter_dict;
+    hb_dict_t        * filters_dict = hb_dict_get(job_dict, "Filters");
+    hb_value_array_t * filter_list = hb_dict_get(filters_dict, "FilterList");
 
-    // Set "Destination" settings in job
-    hb_dict_t *dest_dict = hb_dict_get(job_dict, "Destination");
-    hb_dict_set(dest_dict, "ChapterMarkers", hb_value_bool(chapters));
-
-    hb_dict_t *filters_dict = hb_dict_get(job_dict, "Filters");
-    hb_value_array_t *filter_list = hb_dict_get(filters_dict, "FilterList");
+    // Rotate filter settings must be known prior to applying crop/scale
+    char * rotate = hb_value_get_string_xform(
+                        hb_dict_get(preset, "PictureRotate"));
+    hb_dict_t * rotate_settings = NULL;
+    if (rotate != NULL)
+    {
+        rotate_settings = hb_generate_filter_settings(HB_FILTER_ROTATE,
+                                                      NULL, NULL, rotate);
+        if (rotate_settings == NULL)
+        {
+            hb_error("Invalid rotate filter settings (%s)", rotate);
+            return -1;
+        }
+        else if (!hb_dict_get_bool(rotate_settings, "disable") &&
+                 (hb_dict_get_int(rotate_settings, "angle") != 0 ||
+                  hb_dict_get_bool(rotate_settings, "hflip")))
+        {
+            filter_dict = hb_dict_init();
+            hb_dict_set(filter_dict, "ID", hb_value_int(HB_FILTER_ROTATE));
+            hb_dict_set(filter_dict, "Settings", rotate_settings);
+            hb_add_filter2(filter_list, filter_dict);
+        }
+        else
+        {
+            hb_value_free(&rotate_settings);
+        }
+        free(rotate);
+    }
 
     // Calculate default job geometry settings
-    hb_geometry_t srcGeo, resultGeo;
+    hb_geometry_crop_t     srcGeo;
+    hb_geometry_t          resultGeo;
     hb_geometry_settings_t geo;
     int keep_aspect, allow_upscaling, use_maximum_size;
 
-    srcGeo = title->geometry;
-    if (!hb_value_get_bool(hb_dict_get(preset, "PictureAutoCrop")))
+    srcGeo.geometry = title->geometry;
+    memcpy(srcGeo.crop, title->crop, sizeof(geo.crop));
+    memset(geo.crop, 0, sizeof(geo.crop));
+
+    if (rotate_settings != NULL)
     {
-        geo.crop[0] = hb_value_get_int(hb_dict_get(preset, "PictureTopCrop"));
-        geo.crop[1] = hb_value_get_int(hb_dict_get(preset, "PictureBottomCrop"));
-        geo.crop[2] = hb_value_get_int(hb_dict_get(preset, "PictureLeftCrop"));
-        geo.crop[3] = hb_value_get_int(hb_dict_get(preset, "PictureRightCrop"));
+        int angle = hb_dict_get_int(rotate_settings, "angle");
+        int hflip = hb_dict_get_bool(rotate_settings, "hflip");
+        hb_rotate_geometry(&srcGeo, &srcGeo, angle, hflip);
+    }
+    
+    switch(hb_dict_get_int(preset, "PictureCropMode")) 
+    {
+        case 0: // Automatic
+          memcpy(geo.crop, srcGeo.crop, sizeof(geo.crop));
+          break;
+        case 1: // Loose
+          memcpy(geo.crop, title->loose_crop, sizeof(geo.crop));
+          break;
+        case 2: // None
+            geo.crop[0] = 0;
+            geo.crop[1] = 0;
+            geo.crop[2] = 0;
+            geo.crop[3] = 0;
+            break;
+        case 3: // Custom
+            geo.crop[0] = hb_dict_get_int(preset, "PictureTopCrop");
+            geo.crop[1] = hb_dict_get_int(preset, "PictureBottomCrop");
+            geo.crop[2] = hb_dict_get_int(preset, "PictureLeftCrop");
+            geo.crop[3] = hb_dict_get_int(preset, "PictureRightCrop");
+            break;
+    }
+
+    const char * pad_mode;
+    pad_mode = hb_dict_get_string(preset, "PicturePadMode");
+    if (pad_mode != NULL && !strcmp(pad_mode, "custom"))
+    {
+        geo.pad[0] = hb_value_get_int(hb_dict_get(preset, "PicturePadTop"));
+        geo.pad[1] = hb_value_get_int(hb_dict_get(preset, "PicturePadBottom"));
+        geo.pad[2] = hb_value_get_int(hb_dict_get(preset, "PicturePadLeft"));
+        geo.pad[3] = hb_value_get_int(hb_dict_get(preset, "PicturePadRight"));
     }
     else
     {
-        memcpy(geo.crop, title->crop, sizeof(geo.crop));
+        memset(geo.pad, 0, sizeof(geo.pad));
     }
+
     geo.modulus = hb_value_get_int(hb_dict_get(preset, "PictureModulus"));
     if (geo.modulus < 2)
         geo.modulus = 2;
-    if (hb_value_get_bool(hb_dict_get(preset, "PictureLooseCrop")))
-    {
-        // Crop a few extra pixels to avoid scaling to fit Modulus
-        int extra1, extra2, crop_width, crop_height, width, height;
-
-        crop_width = srcGeo.width - geo.crop[2] - geo.crop[3];
-        crop_height = srcGeo.height - geo.crop[0] - geo.crop[1];
-        width = MULTIPLE_MOD_DOWN(crop_width, geo.modulus);
-        height = MULTIPLE_MOD_DOWN(crop_height, geo.modulus);
-
-        extra1 = EVEN((crop_height - height) / 2);
-        extra2 = crop_height - height - extra1;
-        geo.crop[0] += extra1;
-        geo.crop[1] += extra2;
-        extra1 = EVEN((crop_width - width) / 2);
-        extra2 = crop_width - width - extra1;
-        geo.crop[2] += extra1;
-        geo.crop[3] += extra2;
-    }
     hb_value_t *ana_mode_value = hb_dict_get(preset, "PicturePAR");
     if (hb_value_type(ana_mode_value) == HB_VALUE_TYPE_STRING)
     {
@@ -1950,91 +2265,173 @@ int hb_preset_apply_title(hb_handle_t *h, int title_index,
         geo.mode = hb_value_get_int(hb_dict_get(preset, "PicturePAR"));
     }
     keep_aspect = hb_value_get_bool(hb_dict_get(preset, "PictureKeepRatio"));
-    if (geo.mode == HB_ANAMORPHIC_STRICT ||
-        geo.mode == HB_ANAMORPHIC_LOOSE  ||
-        geo.mode == HB_ANAMORPHIC_AUTO)
-    {
-        keep_aspect = 1;
-    }
     geo.keep = keep_aspect * HB_KEEP_DISPLAY_ASPECT;
+    allow_upscaling = hb_dict_get_bool(preset, "PictureAllowUpscaling");
+    use_maximum_size = hb_dict_get_bool(preset, "PictureUseMaximumSize");
+    geo.flags = 0;
+    geo.flags |= allow_upscaling  * HB_GEO_SCALE_UP;
+    geo.flags |= use_maximum_size * HB_GEO_SCALE_BEST;
+
     geo.itu_par = hb_value_get_bool(hb_dict_get(preset, "PictureItuPAR"));
     geo.maxWidth = hb_value_get_int(hb_dict_get(preset, "PictureWidth"));
     geo.maxHeight = hb_value_get_int(hb_dict_get(preset, "PictureHeight"));
     geo.geometry = title->geometry;
     int width = hb_value_get_int(hb_dict_get(preset, "PictureForceWidth"));
     int height = hb_value_get_int(hb_dict_get(preset, "PictureForceHeight"));
-    allow_upscaling = hb_value_get_bool(hb_dict_get(preset, "PictureAllowUpscaling"));
-    use_maximum_size = hb_value_get_bool(hb_dict_get(preset, "PictureUseMaximumSize"));
+
     if (width > 0)
     {
         geo.geometry.width = width;
         geo.keep |= HB_KEEP_WIDTH;
-    }
-    else if (allow_upscaling && use_maximum_size)
-    {
-        geo.geometry.width = geo.maxWidth;
-    }
-    else
-    {
-        geo.geometry.width -= geo.crop[2] + geo.crop[3];
     }
     if (height > 0)
     {
         geo.geometry.height = height;
         geo.keep |= HB_KEEP_HEIGHT;
     }
-    else if (allow_upscaling && use_maximum_size)
+
+    geo.geometry.par.num = hb_dict_get_int(preset, "PicturePARWidth");
+    geo.geometry.par.den = hb_dict_get_int(preset, "PicturePARHeight");
+
+    int display_width = hb_dict_get_int(preset, "PictureDARWidth");
+    if (display_width <= 0 && geo.geometry.par.den)
     {
-        geo.geometry.height = geo.maxHeight;
+        int cropped_width = geo.geometry.width - geo.crop[2] - geo.crop[3];
+        display_width = ((double)geo.geometry.par.num / geo.geometry.par.den) * cropped_width + 0.5;
     }
-    else
-    {
-        geo.geometry.height -= geo.crop[0] + geo.crop[1];
-    }
-    if (geo.mode == HB_ANAMORPHIC_CUSTOM && !keep_aspect)
-    {
-        int dar_width;
-        dar_width = hb_value_get_int(hb_dict_get(preset, "PictureDARWidth"));
-        if (dar_width > 0)
-        {
-            geo.geometry.par.num = dar_width;
-            geo.geometry.par.den = geo.geometry.width;
-        }
-        else
-        {
-            geo.geometry.par.num =
-                hb_value_get_int(hb_dict_get(preset, "PicturePARWidth"));
-            geo.geometry.par.den =
-                hb_value_get_int(hb_dict_get(preset, "PicturePARHeight"));
-        }
-    }
-    hb_set_anamorphic_size2(&srcGeo, &geo, &resultGeo);
+    geo.displayWidth     = display_width;
+    geo.displayHeight    = geo.geometry.height;
+
+    hb_set_anamorphic_size2(&srcGeo.geometry, &geo, &resultGeo);
+
     hb_dict_t *par_dict = hb_dict_get(job_dict, "PAR");
     hb_dict_set(par_dict, "Num", hb_value_int(resultGeo.par.num));
     hb_dict_set(par_dict, "Den", hb_value_int(resultGeo.par.den));
     par_dict = NULL;
 
-    hb_dict_t *filter_dict;
-    hb_dict_t *filter_settings;
+    hb_dict_t * scale_settings;
 
-    filter_settings = hb_dict_init();
-    hb_dict_set(filter_settings, "width", hb_value_int(resultGeo.width));
-    hb_dict_set(filter_settings, "height", hb_value_int(resultGeo.height));
-    hb_dict_set(filter_settings, "crop-top", hb_value_int(geo.crop[0]));
-    hb_dict_set(filter_settings, "crop-bottom", hb_value_int(geo.crop[1]));
-    hb_dict_set(filter_settings, "crop-left", hb_value_int(geo.crop[2]));
-    hb_dict_set(filter_settings, "crop-right", hb_value_int(geo.crop[3]));
-    if (hb_validate_filter_settings(HB_FILTER_CROP_SCALE, filter_settings))
+    scale_settings = hb_dict_init();
+    hb_dict_set(scale_settings, "width", hb_value_int(resultGeo.width));
+    hb_dict_set(scale_settings, "height", hb_value_int(resultGeo.height));
+    hb_dict_set(scale_settings, "crop-top", hb_value_int(geo.crop[0]));
+    hb_dict_set(scale_settings, "crop-bottom", hb_value_int(geo.crop[1]));
+    hb_dict_set(scale_settings, "crop-left", hb_value_int(geo.crop[2]));
+    hb_dict_set(scale_settings, "crop-right", hb_value_int(geo.crop[3]));
+    if (hb_validate_filter_settings(HB_FILTER_CROP_SCALE, scale_settings))
     {
-        hb_error("hb_preset_apply_title: Internal error, invalid CROP_SCALE");
-        hb_value_free(&filter_settings);
+        hb_error("hb_preset_apply_dimensions: Internal error, invalid CROP_SCALE");
+        hb_value_free(&scale_settings);
         goto fail;
     }
 
     filter_dict = hb_dict_init();
     hb_dict_set(filter_dict, "ID", hb_value_int(HB_FILTER_CROP_SCALE));
-    hb_dict_set(filter_dict, "Settings", filter_settings);
+    hb_dict_set(filter_dict, "Settings", scale_settings);
     hb_add_filter2(filter_list, filter_dict);
+
+    // Pad filter requires knowing crop/scale settings
+    char       * pad_params = NULL;
+    if (pad_mode != NULL && strcmp(pad_mode, "none"))
+    {
+        // Preset values used by the GUI and built-in presets
+        int pad[4] = {0,};
+        const char * color;
+
+        if (!strcmp(pad_mode, "custom"))
+        {
+            pad[0] = hb_dict_get_int(preset, "PicturePadTop");
+            pad[1] = hb_dict_get_int(preset, "PicturePadBottom");
+            pad[2] = hb_dict_get_int(preset, "PicturePadLeft");
+            pad[3] = hb_dict_get_int(preset, "PicturePadRight");
+        }
+
+        if (scale_settings != NULL)
+        {
+            int fillwidth, fillheight;
+
+            int width     = hb_dict_get_int(scale_settings, "width");
+            int height    = hb_dict_get_int(scale_settings, "height");
+            int maxWidth  = hb_dict_get_int(preset, "PictureWidth");
+            int maxHeight = hb_dict_get_int(preset, "PictureHeight");
+
+            fillwidth  = fillheight  = !strcmp(pad_mode, "fill");
+            fillheight = fillheight || !strcmp(pad_mode, "letterbox");
+            fillwidth  = fillwidth  || !strcmp(pad_mode, "pillarbox");
+
+            if (fillwidth && maxWidth > 0)
+            {
+                pad[2] = (maxWidth  - width) / 2;
+                pad[3] =  maxWidth  - width - pad[2];
+            }
+            if (fillheight && maxHeight > 0)
+            {
+                pad[0] = (maxHeight - height) / 2;
+                pad[1] =  maxHeight - height - pad[0];
+            }
+        }
+        color  = hb_dict_get_string(preset, "PicturePadColor");
+        if (color == NULL)
+        {
+            color = "black";
+        }
+
+        pad_params =
+            hb_strdup_printf("top=%d:bottom=%d:left=%d:right=%d:color=%s",
+                             pad[0], pad[1], pad[2], pad[3], color);
+    }
+    else
+    {
+        // Preset value used by the CLI
+        pad_params =
+            hb_value_get_string_xform(hb_dict_get(preset, "PicturePad"));
+    }
+    if (pad_params != NULL)
+    {
+        hb_dict_t * filter_settings;
+        filter_settings = hb_generate_filter_settings(HB_FILTER_PAD,
+                                                      NULL, NULL, pad_params);
+        if (filter_settings == NULL)
+        {
+            hb_error("Invalid pad filter settings (%s)", pad_params);
+            return -1;
+        }
+        else if (!hb_dict_get_bool(filter_settings, "disable"))
+        {
+            filter_dict = hb_dict_init();
+            hb_dict_set(filter_dict, "ID", hb_value_int(HB_FILTER_PAD));
+            hb_dict_set(filter_dict, "Settings", filter_settings);
+            hb_add_filter2(filter_list, filter_dict);
+        }
+        else
+        {
+            hb_value_free(&filter_settings);
+        }
+        free(pad_params);
+    }
+
+    return 0;
+
+fail:
+    return -1;
+}
+
+int hb_preset_apply_title(hb_handle_t *h, int title_index,
+                          const hb_dict_t *preset, hb_dict_t *job_dict)
+{
+    // Apply preset settings  that requires the title
+    hb_title_t *title = hb_find_title_by_index(h, title_index);
+    if (title == NULL)
+        return -1;
+
+    int chapters = hb_value_get_bool(hb_dict_get(preset, "ChapterMarkers"));
+    if (hb_list_count(title->list_chapter) <= 1)
+        chapters = 0;
+
+    // Set "Destination" settings in job
+    hb_dict_t *dest_dict = hb_dict_get(job_dict, "Destination");
+    hb_dict_set(dest_dict, "ChapterMarkers", hb_value_bool(chapters));
+
     // Audio settings
     if (hb_preset_job_add_audio(h, title_index, preset, job_dict) != 0)
     {
@@ -2080,6 +2477,9 @@ hb_dict_t* hb_preset_job_init(hb_handle_t *h, int title_index,
         goto fail;
 
     if (hb_preset_apply_video(preset, job_dict) < 0)
+        goto fail;
+
+    if (hb_preset_apply_dimensions(h, title_index, preset, job_dict) < 0)
         goto fail;
 
     if (hb_preset_apply_filters(preset, job_dict) < 0)
@@ -2574,6 +2974,124 @@ static void und_to_any(hb_value_array_t * list)
     }
 }
 
+static void import_svt_av1_tune_61_0_0(hb_value_t *preset)
+{
+    const char *enc = hb_dict_get_string(preset, "VideoEncoder");
+    int codec = hb_video_encoder_get_from_name(enc);
+
+    if (codec == HB_VCODEC_SVT_AV1 || codec == HB_VCODEC_SVT_AV1_10BIT)
+    {
+        const char *tune = hb_dict_get_string(preset, "VideoTune");
+        if (tune == NULL || strlen(tune) == 0)
+        {
+            hb_dict_set_string(preset, "VideoTune", "vq");
+        }
+    }
+}
+
+static void import_dynamic_metadata_preset_settings_60_0_0(hb_value_t *preset)
+{
+    hb_dict_set_string(preset, "VideoPasshtruHDRDynamicMetadata", "all");
+}
+
+static void import_passthru_preset_settings_57_0_0(hb_value_t *preset)
+{
+    int passthru = hb_dict_get_bool(preset, "MetadataPassthrough");
+    hb_dict_set_bool(preset, "MetadataPassthru", passthru);
+}
+
+static void import_av1_preset_settings_55_0_0(hb_value_t *preset)
+{
+    const char *enc = hb_dict_get_string(preset, "VideoEncoder");
+    int codec = hb_video_encoder_get_from_name(enc);
+
+    if (codec == HB_VCODEC_SVT_AV1 || codec == HB_VCODEC_SVT_AV1_10BIT)
+    {
+        const char *pst = hb_dict_get_string(preset, "VideoPreset");
+        int video_preset = pst ? atoi(pst) : 0;
+
+        if (video_preset == 6)
+        {
+            hb_dict_set_string(preset, "VideoPreset", "7");
+        }
+        else if (video_preset == 12)
+        {
+            hb_dict_set_string(preset, "VideoPreset", "13");
+        }
+    }
+}
+
+static void import_vp9_multipass_settings_53_0_0(hb_value_t *preset)
+{
+    const char *enc = hb_dict_get_string(preset, "VideoEncoder");
+    int codec = hb_video_encoder_get_from_name(enc);
+
+    int vquality_type = hb_dict_get_int(preset, "VideoQualityType");
+
+    if ((codec == HB_VCODEC_FFMPEG_VP9 || codec == HB_VCODEC_FFMPEG_VP9_10BIT)
+        && vquality_type == 2) // constant quality
+    {
+        hb_dict_set_bool(preset, "VideoMultiPass", 0);
+    }
+}
+
+static void import_container_settings_51_0_0(hb_value_t *preset)
+{
+    int optimize = hb_dict_get_bool(preset, "Mp4HttpOptimize");
+    hb_dict_set_bool(preset, "Optimize", optimize);
+}
+
+static void import_video_pass_settings_50_0_0(hb_value_t *preset)
+{
+    int two_pass = hb_dict_get_bool(preset, "VideoTwoPass");
+    int turbo_two_pass = hb_dict_get_bool(preset, "VideoTurboTwoPass");
+    hb_dict_set_bool(preset, "VideoMultiPass", two_pass);
+    hb_dict_set_bool(preset, "VideoTurboMultiPass", turbo_two_pass);
+}
+
+static void import_pic_settings_47_0_0(hb_value_t *preset)
+{
+    int auto_crop = hb_dict_get_bool(preset, "PictureAutoCrop");
+    int ct = hb_dict_get_int(preset, "PictureTopCrop");
+    int cb = hb_dict_get_int(preset, "PictureBottomCrop");
+    int cl = hb_dict_get_int(preset, "PictureLeftCrop");
+    int cr = hb_dict_get_int(preset, "PictureRightCrop");
+
+    if (auto_crop)
+    {
+        hb_dict_set_int(preset, "PictureCropMode", 0);
+    }
+    else
+    {
+        if (ct == 0 && cb == 0 && cl == 0 && cr == 0)
+        {
+            hb_dict_set_int(preset, "PictureCropMode", 2);
+        }
+        else
+        {
+            hb_dict_set_int(preset, "PictureCropMode", 3);
+        }
+    }
+}
+
+static void import_pic_settings_44_0_0(hb_value_t *preset)
+{
+    int uses_pic = hb_dict_get_int(preset, "UsesPictureSettings");
+
+    if (uses_pic != 1)
+    {
+        hb_dict_set_int(preset, "PictureWidth", 0);
+        hb_dict_set_int(preset, "PictureHeight", 0);
+    }
+    hb_dict_remove(preset, "UsesPictureSettings");
+
+    const char *pic_par = hb_dict_get_string(preset, "PicturePAR");
+    if (pic_par == NULL || !strcasecmp(pic_par, "loose"))
+    {
+        hb_dict_set(preset, "PicturePAR", hb_value_string("auto"));
+    }
+}
+
 static void import_lang_list_40_0_0(hb_value_t *preset)
 {
     hb_value_array_t * lang_list;
@@ -2682,7 +3200,7 @@ static void import_filters_11_1_0(hb_value_t *preset)
         {
             if (strcasecmp(str, "deinterlace"))
             {
-                import_custom_11_1_0(preset, HB_FILTER_DEINTERLACE,
+                import_custom_11_1_0(preset, HB_FILTER_YADIF,
                                      "PictureDeinterlaceCustom");
             }
             else if (strcasecmp(str, "decomb"))
@@ -3004,7 +3522,7 @@ static void import_deint_0_0_0(hb_value_t *preset)
     {
         const char *s;
         int index = hb_value_get_int(val);
-        s = import_indexed_filter(HB_FILTER_DEINTERLACE, index);
+        s = import_indexed_filter(HB_FILTER_YADIF, index);
         if (s != NULL)
         {
             hb_dict_set(preset, "PictureDeinterlace", hb_value_string(s));
@@ -3144,6 +3662,10 @@ static void import_audio_0_0_0(hb_value_t *preset)
         hb_value_array_append(copy, hb_value_string("copy:mp3"));
     if (hb_value_get_bool(hb_dict_get(preset, "AudioAllowAACPass")))
         hb_value_array_append(copy, hb_value_string("copy:aac"));
+    if (hb_value_get_bool(hb_dict_get(preset, "AudioAllowVORBISPass")))
+        hb_value_array_append(copy, hb_value_string("copy:vorbis"));
+    if (hb_value_get_bool(hb_dict_get(preset, "AudioAllowOPUSPass")))
+        hb_value_array_append(copy, hb_value_string("copy:opus"));
     if (hb_value_get_bool(hb_dict_get(preset, "AudioAllowAC3Pass")))
         hb_value_array_append(copy, hb_value_string("copy:ac3"));
     if (hb_value_get_bool(hb_dict_get(preset, "AudioAllowDTSPass")))
@@ -3152,6 +3674,8 @@ static void import_audio_0_0_0(hb_value_t *preset)
         hb_value_array_append(copy, hb_value_string("copy:dtshd"));
     if (hb_value_get_bool(hb_dict_get(preset, "AudioAllowEAC3Pass")))
         hb_value_array_append(copy, hb_value_string("copy:eac3"));
+    if (hb_value_get_bool(hb_dict_get(preset, "AudioAllowALACPass")))
+        hb_value_array_append(copy, hb_value_string("copy:alac"));
     if (hb_value_get_bool(hb_dict_get(preset, "AudioAllowFLACPass")))
         hb_value_array_append(copy, hb_value_string("copy:flac"));
     if (hb_value_get_bool(hb_dict_get(preset, "AudioAllowTRUEHDPass")))
@@ -3225,9 +3749,72 @@ static void import_video_0_0_0(hb_value_t *preset)
     }
 }
 
+static void import_61_0_0(hb_value_t *preset)
+{
+    import_svt_av1_tune_61_0_0(preset);
+}
+
+static void import_60_0_0(hb_value_t *preset)
+{
+    import_dynamic_metadata_preset_settings_60_0_0(preset);
+
+    import_61_0_0(preset);
+}
+
+static void import_57_0_0(hb_value_t *preset)
+{
+    import_passthru_preset_settings_57_0_0(preset);
+
+    import_60_0_0(preset);
+}
+
+static void import_55_0_0(hb_value_t *preset)
+{
+    import_av1_preset_settings_55_0_0(preset);
+
+    import_57_0_0(preset);
+}
+
+static void import_53_0_0(hb_value_t *preset)
+{
+    import_vp9_multipass_settings_53_0_0(preset);
+
+    import_55_0_0(preset);
+}
+
+static void import_51_0_0(hb_value_t *preset)
+{
+    import_container_settings_51_0_0(preset);
+
+    import_53_0_0(preset);
+}
+
+static void import_50_0_0(hb_value_t *preset)
+{
+    import_video_pass_settings_50_0_0(preset);
+
+    import_51_0_0(preset);
+}
+
+static void import_47_0_0(hb_value_t *preset)
+{
+    import_pic_settings_47_0_0(preset);
+
+    import_50_0_0(preset);
+}
+
+static void import_44_0_0(hb_value_t *preset)
+{
+    import_pic_settings_44_0_0(preset);
+
+    import_47_0_0(preset);
+}
+
 static void import_40_0_0(hb_value_t *preset)
 {
     import_lang_list_40_0_0(preset);
+
+    import_44_0_0(preset);
 }
 
 static void import_35_0_0(hb_value_t *preset)
@@ -3359,6 +3946,52 @@ static int preset_import(hb_value_t *preset, int major, int minor, int micro)
             import_40_0_0(preset);
             result = 1;
         }
+        else if (cmpVersion(major, minor, micro, 44, 0, 0) <= 0)
+        {
+            import_44_0_0(preset);
+            result = 1;
+        }
+        else if (cmpVersion(major, minor, micro, 47, 0, 0) <= 0)
+        {
+            import_47_0_0(preset);
+            result = 1;
+        }
+        else if (cmpVersion(major, minor, micro, 50, 0, 0) <= 0)
+        {
+            import_50_0_0(preset);
+            result = 1;
+        }
+        else if (cmpVersion(major, minor, micro, 51, 0, 0) <= 0)
+        {
+            import_51_0_0(preset);
+            result = 1;
+        }
+        else if (cmpVersion(major, minor, micro, 53, 0, 0) <= 0)
+        {
+            import_53_0_0(preset);
+            result = 1;
+        }
+        else if (cmpVersion(major, minor, micro, 55, 0, 0) <= 0)
+        {
+            import_55_0_0(preset);
+            result = 1;
+        }
+        else if (cmpVersion(major, minor, micro, 57, 0, 0) <= 0)
+        {
+            import_57_0_0(preset);
+            result = 1;
+        }
+        else if (cmpVersion(major, minor, micro, 60, 0, 0) <= 0)
+        {
+            import_60_0_0(preset);
+            result = 1;
+        }
+        else if (cmpVersion(major, minor, micro, 61, 0, 0) <= 0)
+        {
+            import_61_0_0(preset);
+            result = 1;
+        }
+
         preset_clean(preset, hb_preset_template);
     }
     return result;
@@ -3583,21 +4216,11 @@ int hb_presets_gui_init(void)
     hb_get_user_config_filename(path, "%s", HB_PRESET_JSON_FILE);
     dict = hb_value_read_json(path);
 #endif
-#if defined(HB_PRESET_PLIST_FILE)
-    if (dict == NULL)
-    {
-        hb_get_user_config_filename(path, "%s", HB_PRESET_PLIST_FILE);
-        dict = hb_plist_parse_file(path);
-    }
-#endif
     if (dict == NULL)
     {
         hb_error("Failed to load GUI presets file");
 #if defined(HB_PRESET_JSON_FILE)
         hb_error("Attempted: %s", HB_PRESET_JSON_FILE);
-#endif
-#if defined(HB_PRESET_PLIST_FILE)
-        hb_error("Attempted: %s", HB_PRESET_PLIST_FILE);
 #endif
         return -1;
     }
@@ -3836,8 +4459,6 @@ int hb_presets_version_file(const char *filename,
 
     hb_value_t *preset = hb_value_read_json(filename);
     if (preset == NULL)
-        preset = hb_plist_parse_file(filename);
-    if (preset == NULL)
         return -1;
 
     result = hb_presets_version(preset, major, minor, micro);
@@ -3850,8 +4471,6 @@ hb_value_t* hb_presets_read_file(const char *filename)
 {
     hb_value_t *preset = hb_value_read_json(filename);
     if (preset == NULL)
-        preset = hb_plist_parse_file(filename);
-    if (preset == NULL)
         return NULL;
 
     return preset;
@@ -3862,8 +4481,6 @@ char * hb_presets_read_file_json(const char *filename)
     char *result;
     hb_value_t *preset = hb_value_read_json(filename);
     if (preset == NULL)
-        preset = hb_plist_parse_file(filename);
-    if (preset == NULL)
         return NULL;
 
     result = hb_value_get_json(preset);
@@ -3873,8 +4490,6 @@ char * hb_presets_read_file_json(const char *filename)
 int hb_presets_add_file(const char *filename)
 {
     hb_value_t *preset = hb_value_read_json(filename);
-    if (preset == NULL)
-        preset = hb_plist_parse_file(filename);
     if (preset == NULL)
         return -1;
 
@@ -3921,7 +4536,7 @@ int hb_presets_add_path(char * path)
 
     // Count the total number of entries
     count = 0;
-    while ((entry = hb_readdir(dir)))
+    while (hb_readdir(dir))
     {
         count++;
     }

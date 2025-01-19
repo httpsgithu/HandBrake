@@ -10,8 +10,7 @@
 namespace HandBrakeWPF.ViewModels
 {
     using System;
-
-    using Caliburn.Micro;
+    using System.Collections.ObjectModel;
 
     using HandBrakeWPF.EventArgs;
     using HandBrakeWPF.Services.Encode.Model;
@@ -44,20 +43,18 @@ namespace HandBrakeWPF.ViewModels
 
         public event EventHandler<TabStatusEventArgs> TabStatusChanged { add { } remove { } }
 
-        /// <summary>
-        /// Gets or sets the meta data.
-        /// </summary>
-        public MetaData MetaData
+        public ObservableCollection<MetaDataValue> SourceMetadata
         {
-            get
-            {
-                return this.task.MetaData;
-            }
-
+            get => this.task.MetaData;
             set
             {
+                if (Equals(value, this.task.MetaData))
+                {
+                    return;
+                }
+
                 this.task.MetaData = value;
-                this.NotifyOfPropertyChange(() => this.MetaData);
+                this.OnPropertyChanged();
             }
         }
 
@@ -78,10 +75,18 @@ namespace HandBrakeWPF.ViewModels
         /// </param>
         public void SetSource(Source source, Title selectedTitle, Preset currentPreset, EncodeTask encodeTask)
         {
-            return; // Disabled for now.
-            // this.task = encodeTask;
-            // this.task.MetaData = new MetaData(selectedTitle.Metadata);
-            // this.NotifyOfPropertyChange(() => this.MetaData);
+            this.task = encodeTask;
+
+            this.SourceMetadata.Clear();
+            if (selectedTitle.Metadata != null)
+            {
+                foreach (var item in selectedTitle.Metadata)
+                {
+                    this.SourceMetadata.Add(new MetaDataValue(item.Key, item.Value));
+                }
+            }
+
+            this.NotifyOfPropertyChange(() => this.SourceMetadata);
         }
 
         /// <summary>
@@ -106,7 +111,7 @@ namespace HandBrakeWPF.ViewModels
         public void UpdateTask(EncodeTask encodeTask)
         {
             this.task = encodeTask;
-            this.NotifyOfPropertyChange(() => this.MetaData);
+            this.NotifyOfPropertyChange(() => this.SourceMetadata);
         }
 
         public bool MatchesPreset(Preset preset)

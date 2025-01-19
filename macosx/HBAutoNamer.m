@@ -71,6 +71,7 @@ static void *HBAutoNamerContext = &HBAutoNamerContext;
     [ud addObserver:self forKeyPath:@"values.HBAutoNamingRemoveUnderscore" options:0 context:HBAutoNamerPrefsContext];
     [ud addObserver:self forKeyPath:@"values.HBAutoNamingRemovePunctuation" options:0 context:HBAutoNamerPrefsContext];
     [ud addObserver:self forKeyPath:@"values.HBAutoNamingTitleCase" options:0 context:HBAutoNamerPrefsContext];
+    [ud addObserver:self forKeyPath:@"values.HBAutoNamingISODateFormat" options:0 context:HBAutoNamerPrefsContext];
 }
 
 - (void)removePrefsObservers
@@ -80,7 +81,7 @@ static void *HBAutoNamerContext = &HBAutoNamerContext;
     [ud removeObserver:self forKeyPath:@"values.HBAutoNamingRemoveUnderscore" context:HBAutoNamerPrefsContext];
     [ud removeObserver:self forKeyPath:@"values.HBAutoNamingRemovePunctuation" context:HBAutoNamerPrefsContext];
     [ud removeObserver:self forKeyPath:@"values.HBAutoNamingTitleCase" context:HBAutoNamerPrefsContext];
-
+    [ud removeObserver:self forKeyPath:@"values.HBAutoNamingISODateFormat" context:HBAutoNamerPrefsContext];
 }
 
 #pragma mark - File extension
@@ -89,6 +90,7 @@ static void *HBAutoNamerContext = &HBAutoNamerContext;
 {
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updateFileExtension:) name:HBAudioEncoderChangedNotification object:self.job.audio];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updateFileExtension:) name:HBChaptersChangedNotification object:self.job];
+    [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updateFileExtension:) name:HBContainerChangedNotification object:self.job];
     [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(updateFileExtension:) name:HBRangeChangedNotification object:self.job.range];
 }
 
@@ -96,6 +98,7 @@ static void *HBAutoNamerContext = &HBAutoNamerContext;
 {
     [[NSNotificationCenter defaultCenter] removeObserver:self name:HBAudioEncoderChangedNotification object:self.job.audio];
     [[NSNotificationCenter defaultCenter] removeObserver:self name:HBChaptersChangedNotification object:self.job];
+    [[NSNotificationCenter defaultCenter] removeObserver:self name:HBContainerChangedNotification object:self.job];
     [[NSNotificationCenter defaultCenter] removeObserver:self name:HBRangeChangedNotification object:_job.range];
 }
 
@@ -106,9 +109,9 @@ static void *HBAutoNamerContext = &HBAutoNamerContext;
     if (self.job && !(undo.isUndoing || undo.isRedoing))
     {
         NSString *extension = self.job.automaticExt;
-        if (![extension isEqualTo:self.job.outputFileName.pathExtension])
+        if (![extension isEqualTo:self.job.destinationFileName.pathExtension])
         {
-            self.job.outputFileName = [[self.job.outputFileName stringByDeletingPathExtension] stringByAppendingPathExtension:extension];
+            self.job.destinationFileName = [[self.job.destinationFileName stringByDeletingPathExtension] stringByAppendingPathExtension:extension];
         }
     }
 }
@@ -129,7 +132,26 @@ static void *HBAutoNamerContext = &HBAutoNamerContext;
             [self.job addObserver:self forKeyPath:@"range.chapterStart" options:0 context:HBAutoNamerContext];
             [self.job addObserver:self forKeyPath:@"range.chapterStop" options:0 context:HBAutoNamerContext];
         }
-        else if ([formatKey isEqualToString:@"{Quality/Bitrate}"])
+        else if ([formatKey isEqualToString:@"{Preset}"])
+        {
+            [self.job addObserver:self forKeyPath:@"presetName" options:0 context:HBAutoNamerContext];
+        }
+        else if ([formatKey isEqualToString:@"{Width}"])
+        {
+            [self.job addObserver:self forKeyPath:@"picture.storageWidth" options:0 context:HBAutoNamerContext];
+        }
+        else if ([formatKey isEqualToString:@"{Height}"])
+        {
+            [self.job addObserver:self forKeyPath:@"picture.storageHeight" options:0 context:HBAutoNamerContext];
+        }
+        else if ([formatKey isEqualToString:@"{Codec}"] ||
+                 [formatKey isEqualToString:@"{Encoder}"] ||
+                 [formatKey isEqualToString:@"{Bit-Depth}"])
+        {
+            [self.job addObserver:self forKeyPath:@"video.encoder" options:0 context:HBAutoNamerContext];
+        }
+        else if ([formatKey isEqualToString:@"{Quality/Bitrate}"] ||
+                 [formatKey isEqualToString:@"{Quality-Type}"])
         {
             [self.job addObserver:self forKeyPath:@"video.qualityType" options:0 context:HBAutoNamerContext];
             [self.job addObserver:self forKeyPath:@"video.avgBitrate" options:0 context:HBAutoNamerContext];
@@ -147,7 +169,26 @@ static void *HBAutoNamerContext = &HBAutoNamerContext;
             [self.job removeObserver:self forKeyPath:@"range.chapterStart" context:HBAutoNamerContext];
             [self.job removeObserver:self forKeyPath:@"range.chapterStop" context:HBAutoNamerContext];
         }
-        else if ([formatKey isEqualToString:@"{Quality/Bitrate}"])
+        else if ([formatKey isEqualToString:@"{Preset}"])
+        {
+            [self.job removeObserver:self forKeyPath:@"presetName" context:HBAutoNamerContext];
+        }
+        else if ([formatKey isEqualToString:@"{Width}"])
+        {
+            [self.job removeObserver:self forKeyPath:@"picture.storageWidth" context:HBAutoNamerContext];
+        }
+        else if ([formatKey isEqualToString:@"{Height}"])
+        {
+            [self.job removeObserver:self forKeyPath:@"picture.storageHeight" context:HBAutoNamerContext];
+        }
+        else if ([formatKey isEqualToString:@"{Codec}"] ||
+                 [formatKey isEqualToString:@"{Encoder}"] ||
+                 [formatKey isEqualToString:@"{Bit-Depth}"])
+        {
+            [self.job removeObserver:self forKeyPath:@"video.encoder" context:HBAutoNamerContext];
+        }
+        else if ([formatKey isEqualToString:@"{Quality/Bitrate}"] ||
+                 [formatKey isEqualToString:@"{Quality-Type}"])
         {
             [self.job removeObserver:self forKeyPath:@"video.qualityType" context:HBAutoNamerContext];
             [self.job removeObserver:self forKeyPath:@"video.avgBitrate" context:HBAutoNamerContext];
@@ -166,7 +207,7 @@ static void *HBAutoNamerContext = &HBAutoNamerContext;
         NSString *fileName = self.job.automaticName;
 
         // Swap the old one with the new one
-        self.job.outputFileName = [NSString stringWithFormat:@"%@.%@", fileName, self.job.outputFileName.pathExtension];
+        self.job.destinationFileName = [NSString stringWithFormat:@"%@.%@", fileName, self.job.destinationFileName.pathExtension];
     }
 }
 

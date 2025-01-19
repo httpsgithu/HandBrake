@@ -37,11 +37,26 @@ namespace HandBrake.Interop.Interop
         /// </returns>
         public static List<HBPresetTune> GetFilterPresets(int filter)
         {
+            if (filter == 0)
+            {
+                return new List<HBPresetTune>();
+            }
+
             IntPtr ptr = HBFunctions.hb_filter_get_presets_json(filter);
+            if (ptr == new IntPtr(0))
+            {
+                return new List<HBPresetTune>();
+            }
+
             string result = Marshal.PtrToStringAnsi(ptr);
             List<PresetTune> list = JsonSerializer.Deserialize<List<PresetTune>>(result, JsonSettings.Options);
 
             return list.Select(item => new HBPresetTune(item.Name, item.Short_Name)).ToList();
+        }
+
+        public static HBPresetTune GetPreset(int filter, string shortName)
+        {
+            return GetFilterPresets(filter).FirstOrDefault(s => s.ShortName.Equals(shortName));
         }
 
         /// <summary>
@@ -55,11 +70,26 @@ namespace HandBrake.Interop.Interop
         /// </returns>
         public static List<HBPresetTune> GetFilterTunes(int filter)
         {
+            if (filter == 0)
+            {
+                return new List<HBPresetTune>();
+            }
+
             IntPtr ptr = HBFunctions.hb_filter_get_tunes_json(filter);
+            if (ptr == new IntPtr(0))
+            {
+                return new List<HBPresetTune>();
+            }
+
             string result = Marshal.PtrToStringAnsi(ptr);
             List<PresetTune> list = JsonSerializer.Deserialize<List<PresetTune>>(result, JsonSettings.Options);
 
             return list.Select(item => new HBPresetTune(item.Name, item.Short_Name)).ToList();
+        }
+
+        public static HBPresetTune GetTune(int filter, string shortName)
+        {
+            return GetFilterTunes(filter).FirstOrDefault(s => s.ShortName.Equals(shortName));
         }
 
         /// <summary>
@@ -77,8 +107,8 @@ namespace HandBrake.Interop.Interop
         /// Gets the default settings for the filter.
         /// </summary>
         /// <param name="filter">The filter to look up.</param>
-        /// <returns>The default settings for that filter.</returns>
-        public static IDictionary<string, string> GetDefaultCustomSettings(int filter)
+        /// <returns>The default settings for that filter. Values can be strings or numbers.</returns>
+        public static IDictionary<string, object> GetDefaultCustomSettings(int filter)
         {
             string presetName;
 
@@ -93,12 +123,12 @@ namespace HandBrake.Interop.Interop
             }
             else
             {
-                return new Dictionary<string, string>();
+                return new Dictionary<string, object>();
             }
 
             IntPtr ptr = HBFunctions.hb_generate_filter_settings_json(filter, presetName, null, null);
             string result = Marshal.PtrToStringAnsi(ptr);
-            return JsonSerializer.Deserialize<Dictionary<string, string>>(result, JsonSettings.Options);
+            return JsonSerializer.Deserialize<Dictionary<string, object>>(result, JsonSettings.Options);
         }
 
         public static string GenerateFilterSettingJson(int filterId, string preset, string tune, string custom)

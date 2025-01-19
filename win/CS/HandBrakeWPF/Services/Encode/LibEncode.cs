@@ -14,19 +14,18 @@ namespace HandBrakeWPF.Services.Encode
     using System.Globalization;
     using System.IO;
 
+    using HandBrake.App.Core.Exceptions;
+    using HandBrake.App.Core.Utilities;
     using HandBrake.Interop.Interop.Interfaces;
     using HandBrake.Interop.Interop.Interfaces.EventArgs;
-    using HandBrake.Interop.Interop.Interfaces.Model;
     using HandBrake.Interop.Interop.Json.Encode;
     using HandBrake.Interop.Interop.Json.State;
 
-    using HandBrakeWPF.Exceptions;
     using HandBrakeWPF.Properties;
     using HandBrakeWPF.Services.Encode.Factories;
     using HandBrakeWPF.Services.Encode.Interfaces;
     using HandBrakeWPF.Services.Interfaces;
     using HandBrakeWPF.Services.Logging.Interfaces;
-    using HandBrakeWPF.Utilities;
 
     using EncodeTask = Model.EncodeTask;
     using HandBrakeInstanceManager = Instance.HandBrakeInstanceManager;
@@ -56,20 +55,20 @@ namespace HandBrakeWPF.Services.Encode
             this.logInstanceManager = logInstanceManager;
             this.encodeCounter = encodeCounter;
             this.portService = portService;
-            this.encodeTaskFactory = new EncodeTaskFactory(this.userSettingService);
+            this.encodeTaskFactory = new EncodeTaskFactory(this.userSettingService, true);
         }
 
         public event EventHandler EncodeStarted;
 
         public event EncodeCompletedStatus EncodeCompleted;
 
-        public event EncodeProgessStatus EncodeStatusChanged;
+        public event EncodeProgressStatus EncodeStatusChanged;
 
-        public bool IsPasued { get; private set; }
+        public bool IsPaused { get; private set; }
 
         public bool IsEncoding { get; protected set; }
 
-        public void Start(EncodeTask task, HBConfiguration configuration, string basePresetName)
+        public void Start(EncodeTask task, string basePresetName)
         {
             try
             {
@@ -84,9 +83,14 @@ namespace HandBrakeWPF.Services.Encode
                 this.currentTask = task;
                 this.isPreviewInstance = task.IsPreviewEncode;
 
-                if (this.userSettingService.GetUserSetting<bool>(UserSettingConstants.ProcessIsolationEnabled))
+                if (task.IsPreviewEncode)
                 {
-                    this.InitLogging(task.Destination);
+                    this.encodeLogService = this.logInstanceManager.ApplicationLogInstance;
+                    this.encodeLogService.Reset();
+                }
+                else if (this.userSettingService.GetUserSetting<bool>(UserSettingConstants.ProcessIsolationEnabled) && Portable.IsProcessIsolationEnabled())
+                {
+                    this.InitRemoteLogging(task.Destination);
                 }
                 else
                 {
@@ -121,7 +125,7 @@ namespace HandBrakeWPF.Services.Encode
                 // Prevent port stealing if multiple jobs start at the same time.
                 lock (this.portLock) 
                 {
-                    this.instance = task.IsPreviewEncode ? HandBrakeInstanceManager.GetPreviewInstance(verbosity, this.userSettingService) : HandBrakeInstanceManager.GetEncodeInstance(verbosity, configuration, this.encodeLogService, this.userSettingService, this.portService);
+                    this.instance = HandBrakeInstanceManager.GetEncodeInstance(verbosity, this.encodeLogService, this.userSettingService, this.portService);
 
                     this.instance.EncodeCompleted += this.InstanceEncodeCompleted;
                     this.instance.EncodeProgress += this.InstanceEncodeProgress;
@@ -132,7 +136,7 @@ namespace HandBrakeWPF.Services.Encode
                     this.VerifyEncodeDestinationPath(task);
 
                     // Get an EncodeJob object for the Interop Library
-                    JsonEncodeObject work = this.encodeTaskFactory.Create(task, configuration);
+                    JsonEncodeObject work = this.encodeTaskFactory.Create(task);
 
                     this.instance.StartEncode(work);
                 }
@@ -145,7 +149,7 @@ namespace HandBrakeWPF.Services.Encode
                 this.IsEncoding = false;
 
                 this.ServiceLogMessage("Failed to start encoding ..." + Environment.NewLine + exc);
-                this.InvokeEncodeCompleted(new EventArgs.EncodeCompletedEventArgs(false, exc, "Unable to start encoding", this.currentTask.Source, this.currentTask.Destination, null, 0));
+                this.InvokeEncodeCompleted(new EventArgs.EncodeCompletedEventArgs(false, exc, "Unable to start encoding", this.currentTask.Source, this.currentTask.Destination, null, 0, 3));
             }
         }
 
@@ -155,7 +159,7 @@ namespace HandBrakeWPF.Services.Encode
             {
                 this.instance.PauseEncode();
                 this.ServiceLogMessage("Encode Paused");
-                this.IsPasued = true;
+                this.IsPaused = true;
             }
         }
 
@@ -165,7 +169,7 @@ namespace HandBrakeWPF.Services.Encode
             {
                 this.instance.ResumeEncode();
                 this.ServiceLogMessage("Encode Resumed");
-                this.IsPasued = false;
+                this.IsPaused = false;
             }
         }
 
@@ -199,7 +203,7 @@ namespace HandBrakeWPF.Services.Encode
 
         protected void ServiceLogMessage(string message)
         {
-            this.encodeLogService.LogMessage(string.Format("{0}# {1}", Environment.NewLine, message));
+            this.encodeLogService.LogMessage(string.Format("{1} # {0}{1}", message, Environment.NewLine));
         }
 
         protected void TimedLogMessage(string message)
@@ -209,7 +213,7 @@ namespace HandBrakeWPF.Services.Encode
 
         private void InvokeEncodeStatusChanged(EventArgs.EncodeProgressEventArgs e)
         {
-            EncodeProgessStatus handler = this.EncodeStatusChanged;
+            EncodeProgressStatus handler = this.EncodeStatusChanged;
             handler?.Invoke(this, e);
         }
 
@@ -280,13 +284,13 @@ namespace HandBrakeWPF.Services.Encode
             string hbLog = this.ProcessLogs(this.currentTask.Destination);
             long filesize = this.GetFilesize(this.currentTask.Destination);
 
-            this.logInstanceManager.Deregister(Path.GetFileName(hbLog));
-
             // Raise the Encode Completed Event.
             this.InvokeEncodeCompleted(
                 e.Error != 0
-                    ? new EventArgs.EncodeCompletedEventArgs(false, null, e.Error.ToString(), this.currentTask.Source, this.currentTask.Destination, hbLog, filesize)
-                    : new EventArgs.EncodeCompletedEventArgs(true, null, string.Empty, this.currentTask.Source, this.currentTask.Destination, hbLog, filesize));
+                    ? new EventArgs.EncodeCompletedEventArgs(false, null, e.Error.ToString(), this.currentTask.Source, this.currentTask.Destination, hbLog, filesize, e.Error)
+                    : new EventArgs.EncodeCompletedEventArgs(true, null, string.Empty, this.currentTask.Source, this.currentTask.Destination, hbLog, filesize, e.Error));
+
+            this.logInstanceManager.Deregister(Path.GetFileName(hbLog));
         }
 
         private long GetFilesize(string destination)
@@ -309,17 +313,17 @@ namespace HandBrakeWPF.Services.Encode
             return 0;
         }
 
-        private void InitLogging(string destination)
+        private void InitRemoteLogging(string destination)
         {
             if (!this.isLoggingInitialised)
             {
                 string logType = this.isPreviewInstance ? "preview" : "encode";
                 string destinationFile = Path.GetFileNameWithoutExtension(destination);
-                string logFileName = string.Format("{0}_{1}_{2}.txt", DateTime.Now.ToString(CultureInfo.InvariantCulture).Replace("/", ".").Replace(":", "-"), logType, destinationFile);
+                string logFileName = string.Format("{0}_{1}_{2}.txt", destinationFile, logType, DateTime.Now.ToString(CultureInfo.InvariantCulture).Replace("/", ".").Replace(":", "-"));
                 string fullLogPath = Path.Combine(DirectoryUtilities.GetLogDirectory(), logFileName);
 
                 this.encodeLogService = new LogService();
-                this.encodeLogService.ConfigureLogging(logFileName, fullLogPath);
+                this.encodeLogService.ConfigureLogging(logFileName, fullLogPath, true);
                 this.encodeLogService.SetId(this.encodeCounter);
                 this.logInstanceManager.Register(logFileName, this.encodeLogService, false);
                 this.isLoggingInitialised = true;
@@ -342,11 +346,13 @@ namespace HandBrakeWPF.Services.Encode
 
                 // Copy the Log to HandBrakes log folder in the users application data folder.
                 // Only needed for process isolation mode. Worker will handle it's own logging.
-                if (!this.userSettingService.GetUserSetting<bool>(UserSettingConstants.ProcessIsolationEnabled))
+                bool processIsolationEnabled = this.userSettingService.GetUserSetting<bool>(UserSettingConstants.ProcessIsolationEnabled) && Portable.IsProcessIsolationEnabled();
+
+                if (!processIsolationEnabled)
                 {
                     string logType = this.isPreviewInstance ? "preview" : "encode";
                     string destinationFile = Path.GetFileNameWithoutExtension(destination);
-                    string logFileName = string.Format("{0}_{1}_{2}.txt", DateTime.Now.ToString(CultureInfo.InvariantCulture).Replace("/", ".").Replace(":", "-"), logType, destinationFile);
+                    string logFileName = string.Format("{0}_{1}_{2}.txt", destinationFile, logType, DateTime.Now.ToString(CultureInfo.InvariantCulture).Replace("/", ".").Replace(":", "-"));
                     this.WriteFile(logContent, Path.Combine(logDir, logFileName));
                     filename = logFileName;
                 }

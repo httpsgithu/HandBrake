@@ -9,52 +9,50 @@
 
 namespace HandBrakeWPF.ViewModels
 {
+    using System;
     using System.Collections.Generic;
     using System.ComponentModel;
     using System.Diagnostics;
     using System.Linq;
 
+    using HandBrake.App.Core.Utilities;
+    using HandBrake.Interop.Interop;
+    using HandBrake.Interop.Interop.Interfaces.Model;
     using HandBrake.Interop.Utilities;
 
     using HandBrakeWPF.Model.Subtitles;
     using HandBrakeWPF.Properties;
+    using HandBrakeWPF.Services.Interfaces;
     using HandBrakeWPF.Services.Presets.Model;
-    using HandBrakeWPF.Utilities;
     using HandBrakeWPF.ViewModels.Interfaces;
+    using HandBrakeWPF.Views;
 
     /// <summary>
     /// The Subtitles View Model
     /// </summary>
     public class SubtitlesDefaultsViewModel : ViewModelBase, ISubtitlesDefaultsViewModel
     {
-        #region Constants and Fields
+        private readonly IWindowManager windowManager;
 
         private SubtitleBehaviours subtitleBehaviours;
-        private BindingList<string> availableLanguages;
-
-        #endregion
-
-        #region Constructors and Destructors
+        private BindingList<Language> availableLanguages;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="SubtitlesDefaultsViewModel"/> class. 
         /// </summary>
-        public SubtitlesDefaultsViewModel()
+        public SubtitlesDefaultsViewModel(IWindowManager windowManager)
         {
-            this.Langauges = LanguageUtilities.MapLanguages().Keys;
+            this.windowManager = windowManager;
+            this.Languages = HandBrakeLanguagesHelper.AllLanguagesWithAny;
             this.CharacterCodes = CharCodesUtilities.GetCharacterCodes();
             this.SubtitleBehaviours = new SubtitleBehaviours();
-            this.SelectedAvailableToMove = new BindingList<string>();
-            this.SelectedLangaugesToMove = new BindingList<string>();
-            this.availableLanguages = new BindingList<string>();
-            this.SetupLanguages((Preset)null);
+            this.SelectedAvailableToMove = new BindingList<Language>();
+            this.SelectedLanguagesToMove = new BindingList<Language>();
+            this.availableLanguages = new BindingList<Language>();
+            this.SetupPreset((Preset)null);
 
             this.Title = Resources.SubtitlesViewModel_SubDefaults;
         }
-
-        #endregion
-
-        #region Properties
 
         public bool IsApplied { get; set; }
 
@@ -64,9 +62,9 @@ namespace HandBrakeWPF.ViewModels
         public IEnumerable<string> CharacterCodes { get; private set; }
 
         /// <summary>
-        /// Gets Langauges.
+        /// Gets Languages.
         /// </summary>
-        public IEnumerable<string> Langauges { get; private set; }
+        public IEnumerable<Language> Languages { get; private set; }
 
         /// <summary>
         /// Gets or sets the subtitle behaviours.
@@ -90,7 +88,7 @@ namespace HandBrakeWPF.ViewModels
         }
 
         /// <summary>
-        /// Gets the sbutitle behaviour modes.
+        /// Gets the subtitle behaviour modes.
         /// </summary>
         public BindingList<SubtitleBehaviourModes> SubtitleBehaviourModeList
         {
@@ -114,7 +112,7 @@ namespace HandBrakeWPF.ViewModels
         /// <summary>
         /// Gets AvailableLanguages.
         /// </summary>
-        public BindingList<string> AvailableLanguages
+        public BindingList<Language> AvailableLanguages
         {
             get
             {
@@ -124,24 +122,20 @@ namespace HandBrakeWPF.ViewModels
             private set
             {
                 this.availableLanguages = value;
-                this.NotifyOfPropertyChange("AvailableLanguages");
+                this.NotifyOfPropertyChange(() => this.AvailableLanguages);
             }
         }
 
         /// <summary>
-        /// Gets SelectedLangauges.
+        /// Gets SelectedLanguages.
         /// </summary>
-        public BindingList<string> SelectedAvailableToMove { get; private set; }
+        public BindingList<Language> SelectedAvailableToMove { get; private set; }
 
         /// <summary>
-        /// Gets SelectedLangauges.
+        /// Gets SelectedLanguages.
         /// </summary>
-        public BindingList<string> SelectedLangaugesToMove { get; private set; }
-
-        #endregion
-
-        #region Public Methods
-         
+        public BindingList<Language> SelectedLanguagesToMove { get; private set; }
+        
         /// <summary>
         /// Audio List Move Left
         /// </summary>
@@ -149,14 +143,13 @@ namespace HandBrakeWPF.ViewModels
         {
             if (this.SelectedAvailableToMove.Count > 0)
             {
-                List<string> copiedList = SelectedAvailableToMove.ToList();
-                foreach (string item in copiedList)
+                List<Language> copiedList = SelectedAvailableToMove.ToList();
+                foreach (Language item in copiedList)
                 {
-                    this.AvailableLanguages.Remove(item);
-                    this.SubtitleBehaviours.SelectedLangauges.Add(item);
+                    this.SubtitleBehaviours.SelectedLanguages.Add(item);
                 }
 
-                this.AvailableLanguages = new BindingList<string>(this.AvailableLanguages.OrderBy(o => o).ToList());
+                this.UpdateAvailableLanguages();
             }
         }
 
@@ -165,17 +158,16 @@ namespace HandBrakeWPF.ViewModels
         /// </summary>
         public void LanguageMoveLeft()
         {
-            if (this.SelectedLangaugesToMove.Count > 0)
+            if (this.SelectedLanguagesToMove.Count > 0)
             {
-                List<string> copiedList = SelectedLangaugesToMove.ToList();
-                foreach (string item in copiedList)
+                List<Language> copiedList = SelectedLanguagesToMove.ToList();
+                foreach (Language item in copiedList)
                 {
-                    this.SubtitleBehaviours.SelectedLangauges.Remove(item);
-                    this.AvailableLanguages.Add(item);
+                    this.SubtitleBehaviours.SelectedLanguages.Remove(item);
                 }
             }
 
-            this.AvailableLanguages = new BindingList<string>(this.AvailableLanguages.OrderBy(o => o).ToList());
+            this.UpdateAvailableLanguages();
         }
 
         /// <summary>
@@ -183,13 +175,8 @@ namespace HandBrakeWPF.ViewModels
         /// </summary>
         public void LanguageClearAll()
         {
-            foreach (string item in this.SubtitleBehaviours.SelectedLangauges)
-            {
-                this.AvailableLanguages.Add(item);
-            }
-            this.AvailableLanguages = new BindingList<string>(this.AvailableLanguages.OrderBy(o => o).ToList());
-
-            this.SubtitleBehaviours.SelectedLangauges.Clear();
+            this.SubtitleBehaviours.SelectedLanguages.Clear();
+            this.UpdateAvailableLanguages();
         }
 
         public void LaunchHelp()
@@ -197,27 +184,18 @@ namespace HandBrakeWPF.ViewModels
             Process.Start("explorer.exe", "https://handbrake.fr/docs/en/latest/advanced/audio-subtitle-defaults.html");
         }
 
-        #endregion
-
-        #region Methods
-
         /// <summary>
         /// The setup languages.
         /// </summary>
         /// <param name="preset">
         /// The preset.
         /// </param>
-        public void SetupLanguages(Preset preset)
+        public void SetupPreset(Preset preset)
         {
             if (preset != null)
             {
-                this.SetupLanguages(preset.SubtitleTrackBehaviours);
+                this.SetupPreset(preset.SubtitleTrackBehaviours);
             }
-        }
-
-        public void ResetApplied()
-        {
-            this.IsApplied = false;
         }
 
         /// <summary>
@@ -226,7 +204,7 @@ namespace HandBrakeWPF.ViewModels
         /// <param name="behaviours">
         /// The behaviours.
         /// </param>
-        public void SetupLanguages(SubtitleBehaviours behaviours)
+        public void SetupPreset(SubtitleBehaviours behaviours)
         {
             // Reset
             this.IsApplied = false;
@@ -236,20 +214,16 @@ namespace HandBrakeWPF.ViewModels
             this.SubtitleBehaviours.SelectedBurnInBehaviour = SubtitleBurnInBehaviourModes.None;
             this.SubtitleBehaviours.AddClosedCaptions = false;
             this.SubtitleBehaviours.AddForeignAudioScanTrack = false;
-            this.SubtitleBehaviours.SelectedLangauges.Clear();
+            this.SubtitleBehaviours.SelectedLanguages.Clear();
 
-            // Step 2, Get all the languages
-            IDictionary<string, string> langList = LanguageUtilities.MapLanguages();
-            langList = (from entry in langList orderby entry.Key ascending select entry).ToDictionary(pair => pair.Key, pair => pair.Value);
-
-            // Step 3, Setup Available Languages
+            // Step 2, Setup Available Languages
             this.AvailableLanguages.Clear();
-            foreach (string item in langList.Keys)
+            foreach (Language item in HandBrakeLanguagesHelper.AllLanguagesWithAny)
             {
                 this.AvailableLanguages.Add(item);
             }
 
-            // Step 4, Set the Selected Languages        
+            // Step 3, Set the Selected Languages        
             if (behaviours != null)
             {
                 this.SubtitleBehaviours.SelectedBehaviour = behaviours.SelectedBehaviour;
@@ -257,13 +231,50 @@ namespace HandBrakeWPF.ViewModels
                 this.SubtitleBehaviours.AddClosedCaptions = behaviours.AddClosedCaptions;
                 this.SubtitleBehaviours.AddForeignAudioScanTrack = behaviours.AddForeignAudioScanTrack;
 
-                foreach (string selectedItem in behaviours.SelectedLangauges)
+                foreach (Language selectedItem in behaviours.SelectedLanguages)
                 {
-                    this.AvailableLanguages.Remove(selectedItem);
-                    this.SubtitleBehaviours.SelectedLangauges.Add(selectedItem);
+                    this.SubtitleBehaviours.SelectedLanguages.Add(selectedItem);
                 }
+
+                this.UpdateAvailableLanguages();
             }
         }
-        #endregion
+
+        public bool ShowWindow()
+        {
+            this.IsApplied = false;
+            this.windowManager.ShowDialog<SubtitlesDefaultsView>(this);
+
+            return this.IsApplied;
+        }
+
+        public void Cancel()
+        {
+            this.IsApplied = false;
+            this.TryClose();
+        }
+
+        public void Save()
+        {
+            this.IsApplied = true;
+            this.TryClose();
+        }
+
+        private void UpdateAvailableLanguages()
+        {
+            List<Language> copiedList = this.SubtitleBehaviours.SelectedLanguages.ToList();
+
+            BindingList<Language> newAvailable = new BindingList<Language>();
+
+            foreach (Language lang in HandBrakeLanguagesHelper.AllLanguagesWithAny)
+            {
+                if (!copiedList.Contains(lang))
+                {
+                    newAvailable.Add(lang);
+                }
+            }
+
+            this.AvailableLanguages = newAvailable;
+        }
     }
 }

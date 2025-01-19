@@ -11,15 +11,19 @@ namespace HandBrakeWPF.ViewModels.Interfaces
 {
     using HandBrakeWPF.Model.Audio;
     using HandBrakeWPF.Model.Subtitles;
-    using HandBrakeWPF.Services.Scan.Model;
 
-    using EncodeTask = HandBrakeWPF.Services.Encode.Model.EncodeTask;
+    using EncodeTask = Services.Encode.Model.EncodeTask;
 
     /// <summary>
     /// The Add Preset View Model
     /// </summary>
-    public interface IAddPresetViewModel
+    public interface IAddPresetViewModel : IViewModelBase
     {
+        /// <summary>
+        /// Gets the name of the newly created preset.
+        /// </summary>
+        string PresetName { get; }
+
         /// <summary>
         /// Prepare the Preset window to create a Preset Object later.
         /// </summary>
@@ -35,6 +39,9 @@ namespace HandBrakeWPF.ViewModels.Interfaces
         /// <param name="subtitleBehaviours">
         /// The subtitle Behaviours.
         /// </param>
-        void Setup(EncodeTask task, Title title, AudioBehaviours audioBehaviours, SubtitleBehaviours subtitleBehaviours);
+        /// <param name="presetName">
+        /// Optional initial preset name.
+        /// </param>
+        void Setup(EncodeTask task, AudioBehaviours audioBehaviours, SubtitleBehaviours subtitleBehaviours, string presetName);
     }
 }

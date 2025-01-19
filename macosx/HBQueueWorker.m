@@ -44,7 +44,6 @@ NSString * const HBQueueWorkerItemNotificationItemKey = @"HBQueueWorkerItemNotif
     {
         NSInteger loggingLevel = [NSUserDefaults.standardUserDefaults integerForKey:HBLoggingLevel];
         _core = [[HBRemoteCore alloc] initWithLogLevel:loggingLevel name:serviceName serviceName:serviceName];
-        _core.automaticallyPreventSleep = NO;
 
         // Set up observers
         [self.core addObserver:self forKeyPath:@"state"
@@ -80,6 +79,11 @@ NSString * const HBQueueWorkerItemNotificationItemKey = @"HBQueueWorkerItemNotif
     [self.core invalidate];
 }
 
+- (void)invalidate
+{
+    [self.core invalidate];
+}
+
 - (BOOL)canEncode
 {
     return self.item == nil;
@@ -100,7 +104,6 @@ NSString * const HBQueueWorkerItemNotificationItemKey = @"HBQueueWorkerItemNotif
 {
     [self.item pausedAtDate:[NSDate date]];
     [self.core pause];
-    [self.core allowSleep];
 }
 
 - (BOOL)canResume
@@ -112,7 +115,6 @@ NSString * const HBQueueWorkerItemNotificationItemKey = @"HBQueueWorkerItemNotif
 {
     [self.item resumedAtDate:[NSDate date]];
     [self.core resume];
-    [self.core preventSleep];
 }
 
 - (void)completedItem:(HBQueueJobItem *)item result:(HBCoreResult)result
@@ -129,18 +131,7 @@ NSString * const HBQueueWorkerItemNotificationItemKey = @"HBQueueWorkerItemNotif
     self.currentLog = nil;
 
     // Mark the encode just finished
-    switch (result) {
-        case HBCoreResultDone:
-            item.state = HBQueueItemStateCompleted;
-            break;
-        case HBCoreResultCanceled:
-            item.state = HBQueueItemStateCanceled;
-            break;
-        default:
-            item.state = HBQueueItemStateFailed;
-            break;
-    }
-
+    [self.item setDoneWithResult:result];
     self.item = nil;
 
     [NSNotificationCenter.defaultCenter postNotificationName:HBQueueWorkerProgressNotification
@@ -193,7 +184,7 @@ NSString * const HBQueueWorkerItemNotificationItemKey = @"HBQueueWorkerItemNotif
     // Completion handler
     void (^completionHandler)(HBCoreResult result) = ^(HBCoreResult result)
     {
-        if (result == HBCoreResultDone)
+        if (result.code == HBCoreResultCodeDone)
         {
             [self realEncodeItem:item];
         }
@@ -211,7 +202,10 @@ NSString * const HBQueueWorkerItemNotificationItemKey = @"HBQueueWorkerItemNotif
             titleIndex:item.job.titleIdx
               previews:10
            minDuration:0
+           maxDuration:0
           keepPreviews:NO
+       hardwareDecoder:[NSUserDefaults.standardUserDefaults boolForKey:HBUseHardwareDecoder]
+       keepDuplicateTitles:item.job.keepDuplicateTitles
        progressHandler:progressHandler
      completionHandler:completionHandler];
 }
@@ -222,6 +216,20 @@ NSString * const HBQueueWorkerItemNotificationItemKey = @"HBQueueWorkerItemNotif
 - (void)realEncodeItem:(HBQueueJobItem *)item
 {
     HBJob *job = item.job;
+
+    if ([NSUserDefaults.standardUserDefaults boolForKey:HBUseHardwareDecoder])
+    {
+        job.hwDecodeUsage = HBJobHardwareDecoderUsageFullPathOnly;
+
+        if ([NSUserDefaults.standardUserDefaults boolForKey:HBAlwaysUseHardwareDecoder])
+        {
+            job.hwDecodeUsage = HBJobHardwareDecoderUsageAlways;
+        }
+    }
+    else
+    {
+        job.hwDecodeUsage = HBJobHardwareDecoderUsageNone;
+    }
 
     // Progress handler
     void (^progressHandler)(HBState state, HBProgress progress, NSString *info) = ^(HBState state, HBProgress progress, NSString *info)

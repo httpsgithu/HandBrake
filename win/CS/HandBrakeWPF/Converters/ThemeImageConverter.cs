@@ -12,10 +12,10 @@ namespace HandBrakeWPF.Converters
     using System;
     using System.Globalization;
     using System.Linq;
+    using System.Windows;
     using System.Windows.Data;
 
-    using Caliburn.Micro;
-
+    using HandBrakeWPF.Helpers;
     using HandBrakeWPF.Model;
     using HandBrakeWPF.Services.Interfaces;
 
@@ -27,10 +27,14 @@ namespace HandBrakeWPF.Converters
 
         public ThemeImageConverter()
         {
-            this.userSettingService = IoC.Get<IUserSettingService>();
+            this.userSettingService = IoCHelper.Get<IUserSettingService>();
             DarkThemeMode mode = (DarkThemeMode)this.userSettingService.GetUserSetting<int>(UserSettingConstants.DarkThemeMode);
 
-            if (mode == DarkThemeMode.Dark || (mode == DarkThemeMode.System && Utilities.SystemInfo.IsAppsUsingDarkTheme()))
+            if (SystemParameters.HighContrast)
+            {
+                this.isDarkTheme = false;
+            } 
+            else if (mode == DarkThemeMode.Dark || (mode == DarkThemeMode.System && Utilities.SystemInfo.IsAppsUsingDarkTheme()))
             {
                 this.isDarkTheme = true;
             }
@@ -41,21 +45,21 @@ namespace HandBrakeWPF.Converters
             string image = parameter as string;
             if (!string.IsNullOrEmpty(image))
             {
-                string direcotry = "Images/"; 
+                string directory = "pack://application:,,,/Views/Images/";
                 if (image.Contains("/"))
                 {
                     string[] components = image.Split('/');
                     string file = components.LastOrDefault();
-                    direcotry = image.Replace(file, string.Empty);
+                    directory = image.Replace(file, string.Empty);
                     image = file;
                 }
 
                 if (this.isDarkTheme)
                 {
-                    return direcotry + "Dark/" + image;
+                    return directory + "Dark/" + image;
                 }
 
-                return direcotry + "Light/" + image;
+                return directory + "Light/" + image;
             }
 
             return null;

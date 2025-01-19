@@ -75,11 +75,11 @@
 #pragma mark Preview images
 
 /**
- * Returns the picture preview at the specified index
+ * Returns the picture preview CVPixelBuffer at the specified index
  *
  * @param index picture index in title.
  */
-- (CGImageRef) copyImageAtIndex: (NSUInteger) index shouldCache: (BOOL) cache
+- (nullable CVPixelBufferRef)copyPixelBufferAtIndex:(NSUInteger)index shouldCache:(BOOL)cache
 {
     if (index >= self.imagesCount)
     {
@@ -88,44 +88,72 @@
 
     // The preview for the specified index may not currently exist, so this method
     // generates it if necessary.
-    CGImageRef theImage = (__bridge CGImageRef)([_previewsCache objectForKey:@(index)]);
+    CVPixelBufferRef pixelBuffer = (__bridge CVPixelBufferRef)([_previewsCache objectForKey:@(index)]);
 
-    if (!theImage)
+    if (!pixelBuffer)
     {
-        HBFilters *filters = self.job.filters;
-        BOOL deinterlace = (![filters.deinterlace isEqualToString:@"off"]);
-
-        theImage = (CGImageRef)[self.scanCore copyImageAtIndex:index
-                                                           forTitle:self.job.title
-                                                       pictureFrame:self.job.picture
-                                                        deinterlace:deinterlace];
-        if (cache && theImage)
+        pixelBuffer = [self.scanCore copyPixelBufferAtIndex:index job:self.job];
+        if (cache && pixelBuffer)
         {
             // The cost is the number of pixels of the image
-            NSUInteger previewCost = CGImageGetWidth(theImage) * CGImageGetHeight(theImage);
-            [self.previewsCache setObject:(__bridge id)(theImage) forKey:@(index) cost:previewCost];
+            NSUInteger previewCost = CVPixelBufferGetWidth(pixelBuffer) * CVPixelBufferGetHeight(pixelBuffer);
+            [self.previewsCache setObject:(__bridge id)(pixelBuffer) forKey:@(index) cost:previewCost];
         }
     }
     else
     {
-        CFRetain(theImage);
+        CFRetain(pixelBuffer);
     }
 
-    return theImage;
+    return pixelBuffer;
+}
+
+/**
+ * Returns the picture preview at the specified index
+ *
+ * @param index picture index in title.
+ */
+- (nullable CGImageRef)copyImageAtIndex:(NSUInteger)index shouldCache:(BOOL)cache
+{
+    if (index >= self.imagesCount)
+    {
+        return nil;
+    }
+
+    // The preview for the specified index may not currently exist, so this method
+    // generates it if necessary.
+    CGImageRef image = (__bridge CGImageRef)([_previewsCache objectForKey:@(index)]);
+
+    if (!image)
+    {
+        image = [self.scanCore copyImageAtIndex:index job:self.job];
+        if (cache && image)
+        {
+            // The cost is the number of pixels of the image
+            NSUInteger previewCost = CGImageGetWidth(image) * CGImageGetHeight(image);
+            [self.previewsCache setObject:(__bridge id)(image) forKey:@(index) cost:previewCost];
+        }
+    }
+    else
+    {
+        CFRetain(image);
+    }
+
+    return image;
 }
 
 /**
  * Purges all images from the cache. The next call to imageAtIndex: will cause a new
  * image to be generated.
  */
-- (void) purgeImageCache
+- (void)purgeImageCache
 {
     [self.previewsCache removeAllObjects];
 }
 
 - (CGSize)imageSize
 {
-    return CGSizeMake(self.job.picture.displayWidth, self.job.picture.height);
+    return CGSizeMake(self.job.picture.displayWidth, self.job.picture.displayHeight);
 }
 
 - (void)imagesSettingsDidChange
@@ -188,10 +216,7 @@
 
         if (image == NULL)
         {
-            image = (CGImageRef)[self.scanCore copyImageAtIndex:index
-                                                       forTitle:self.job.title
-                                                   pictureFrame:self.job.picture
-                                                    deinterlace:NO];
+            image = [self.scanCore copyImageAtIndex:index job:self.job];
             CFAutorelease(image);
         }
 
@@ -214,17 +239,18 @@
 
 + (NSURL *) generateFileURLForType:(NSString *) type
 {
-    NSURL *previewDirectory = [[HBUtilities appSupportURL] URLByAppendingPathComponent:[NSString stringWithFormat:@"/Previews/%d", getpid()] isDirectory:YES];
+    NSURL *previewDirectory = [[HBUtilities appSupportURL] URLByAppendingPathComponent:[NSString stringWithFormat:@"/Previews/%d", getpid()]
+                                                                           isDirectory:YES];
 
-    if (![[NSFileManager defaultManager] createDirectoryAtPath:previewDirectory.path
-                                  withIntermediateDirectories:YES
-                                                   attributes:nil
-                                                        error:nil])
+    if (![NSFileManager.defaultManager createDirectoryAtURL:previewDirectory
+                                 withIntermediateDirectories:YES
+                                                  attributes:nil
+                                                       error:nil])
     {
         return nil;
     }
 
-    return [previewDirectory URLByAppendingPathComponent:[NSString stringWithFormat:@"preview_temp.%@", type]];
+    return [previewDirectory URLByAppendingPathComponent:[NSString stringWithFormat:@"preview_temp.%@", type] isDirectory:NO];
 }
 
 /**
@@ -253,12 +279,12 @@
     }
 
     // See if there is an existing preview file, if so, delete it.
-    [[NSFileManager defaultManager] removeItemAtURL:destURL error:NULL];
+    [NSFileManager.defaultManager removeItemAtURL:destURL error:NULL];
 
     HBJob *job = [self.job copy];
     job.title = self.job.title;
-    job.outputFileName = destURL.lastPathComponent;
-    job.outputURL = destURL.URLByDeletingLastPathComponent;
+    job.destinationFileName = destURL.lastPathComponent;
+    job.destinationFolderURL = destURL.URLByDeletingLastPathComponent;
 
     job.range.type = HBRangePreviewIndex;
     job.range.previewIndex = (int)index + 1;;
@@ -267,11 +293,26 @@
 
     // Note: unlike a full encode, we only send 1 pass regardless if the final encode calls for 2 passes.
     // this should suffice for a fairly accurate short preview and cuts our preview generation time in half.
-    job.video.twoPass = NO;
+    job.video.multiPass = NO;
+
+    if ([NSUserDefaults.standardUserDefaults boolForKey:HBUseHardwareDecoder])
+    {
+        job.hwDecodeUsage = HBJobHardwareDecoderUsageFullPathOnly;
+
+        if ([NSUserDefaults.standardUserDefaults boolForKey:HBAlwaysUseHardwareDecoder])
+        {
+            job.hwDecodeUsage = HBJobHardwareDecoderUsageAlways;
+        }
+    }
+    else
+    {
+        job.hwDecodeUsage = HBJobHardwareDecoderUsageNone;
+    }
 
     // Init the libhb core
     NSInteger level = [NSUserDefaults.standardUserDefaults integerForKey:HBLoggingLevel];
     self.core = [[HBCore alloc] initWithLogLevel:level name:@"PreviewCore"];
+    self.core.automaticallyPreventSleep = YES;
 
     HBStateFormatter *formatter = [[HBStateFormatter alloc] init];
     formatter.twoLines = NO;
@@ -288,7 +329,7 @@
          }
        completionHandler:^(HBCoreResult result) {
            // Encode done, call the delegate and close libhb handle
-           if (result == HBCoreResultDone)
+           if (result.code == HBCoreResultCodeDone)
            {
                [self.delegate didCreateMovieAtURL:destURL];
            }

@@ -5,6 +5,7 @@
  It may be used under the terms of the GNU General Public License. */
 
 #import <Foundation/Foundation.h>
+#import <CoreVideo/CoreVideo.h>
 
 @class HBJob;
 @class HBPicture;
@@ -36,11 +37,20 @@ typedef NS_ENUM(NSUInteger, HBState) {
 };
 
 // These constants specify the result of a scan or encode.
-typedef NS_ENUM(NSUInteger, HBCoreResult) {
-    HBCoreResultDone,
-    HBCoreResultCanceled,
-    HBCoreResultFailed,
+typedef NS_ENUM(NSUInteger, HBCoreResultCode) {
+    HBCoreResultCodeDone       = 0,
+    HBCoreResultCodeCanceled   = 1,
+    HBCoreResultCodeWrongInput = 2,
+    HBCoreResultCodeInit       = 3,
+    HBCoreResultCodeUnknown    = 4,
+    HBCoreResultCodeRead       = 5
 };
+
+struct HBCoreResult {
+    float            avgFps;
+    HBCoreResultCode code;
+};
+typedef struct HBCoreResult HBCoreResult;
 
 typedef void (^HBCoreProgressHandler)(HBState state, HBProgress progress, NSString *info);
 typedef void (^HBCoreCompletionHandler)(HBCoreResult result);
@@ -76,6 +86,11 @@ typedef void (^HBCoreCompletionHandler)(HBCoreResult result);
  *  Performs the final cleanup for the process.
  */
 + (void)closeGlobal;
+
+/**
+ *  Clear temporary files (for example analyze pass stats).
+ */
++ (void)cleanTemporaryFiles;
 
 /**
  *  Registers a global error handler block.
@@ -141,25 +156,26 @@ typedef void (^HBCoreCompletionHandler)(HBCoreResult result);
 /**
  *  Determines whether the scan operation can scan a particular URL or whether an additional decryption lib is needed.
  *
- *  @param url   the URL of the input file.
+ *  @param urls   the URLs of the input files.
  *  @param error an error containing additional info.
  *
  *  @return YES is the file at URL is scannable.
  */
-- (BOOL)canScan:(NSURL *)url error:(NSError * __autoreleasing *)error;
+- (BOOL)canScan:(NSArray<NSURL *> *)urls error:(NSError * __autoreleasing *)error;
 
 /**
  *  Initiates an asynchronous scan operation and returns immediately.
  *
- *  @param url                 the URL of the input file.
+ *  @param urls            the URLs of the input files.
  *  @param index            the index of the desired title. Use 0 to scan every title.
  *  @param previewsNum         the number of previews image to generate.
- *  @param seconds             the minimum duration of the wanted titles in seconds.
+ *  @param minSeconds             the minimum duration of the wanted titles in seconds.
+ *  @param maxSeconds             the maximum duration of the wanted titles in seconds.
  *  @param keepPreviews        whether the previews images are kept on disk or discarded.
  *  @param progressHandler     a block called periodically with the progress information.
  *  @param completionHandler   a block called with the scan result.
  */
-- (void)scanURL:(NSURL *)url titleIndex:(NSUInteger)index previews:(NSUInteger)previewsNum minDuration:(NSUInteger)seconds keepPreviews:(BOOL)keepPreviews progressHandler:(HBCoreProgressHandler)progressHandler completionHandler:(HBCoreCompletionHandler)completionHandler;
+- (void)scanURLs:(NSArray<NSURL *> *)urls titleIndex:(NSUInteger)index previews:(NSUInteger)previewsNum minDuration:(NSUInteger)minSeconds maxDuration:(NSUInteger)maxSeconds keepPreviews:(BOOL)keepPreviews hardwareDecoder:(BOOL)hardwareDecoder keepDuplicateTitles:(BOOL)keepDuplicateTitles progressHandler:(HBCoreProgressHandler)progressHandler completionHandler:(HBCoreCompletionHandler)completionHandler;
 
 /**
  *  Cancels the scan execution.
@@ -174,19 +190,25 @@ typedef void (^HBCoreCompletionHandler)(HBCoreResult result);
 
 /**
  *  This function converts an image created by libhb (specified via index)
+ *  into an CVPixelBuffer.
+ *
+ *  @param index       the index of the desired image.
+ *  @param job           a HBJob instance.
+ *
+ *  @return a CVPixelBuffer of the wanted image, NULL if the index is out of bounds.
+ */
+- (nullable CVPixelBufferRef)copyPixelBufferAtIndex:(NSUInteger)index job:(HBJob *)job CF_RETURNS_RETAINED;
+
+/**
+ *  This function converts an image created by libhb (specified via index)
  *  into an CGImage.
  *
  *  @param index       the index of the desired image.
- *  @param title       Handle to hb_title_t of desired title
- *  @param frame       a HBPicture instance that describe the image's frame.
- *  @param deinterlace whether the preview image must be deinterlaced or not.
+ *  @param job           a HBJob instance.
  *
  *  @return a CGImageRef of the wanted image, NULL if the index is out of bounds.
  */
-- (nullable CGImageRef)copyImageAtIndex:(NSUInteger)index
-                      forTitle:(HBTitle *)title
-                  pictureFrame:(HBPicture *)frame
-                   deinterlace:(BOOL)deinterlace CF_RETURNS_RETAINED;
+- (nullable CGImageRef)copyImageAtIndex:(NSUInteger)index job:(HBJob *)job CF_RETURNS_RETAINED;
 
 /**
  *  Returns the counts of the available previews images.

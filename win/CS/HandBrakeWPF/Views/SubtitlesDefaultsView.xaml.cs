@@ -9,28 +9,25 @@
 
 namespace HandBrakeWPF.Views
 {
+    using System;
+
+    using HandBrakeWPF.Helpers;
     using System.Windows;
-    using System.Windows.Controls;
+    using HandBrakeWPF.Commands;
+    using System.Windows.Input;
 
-    using HandBrakeWPF.ViewModels;
-
-    /// <summary>
-    /// Interaction logic for SubtitlesDefaultsView.xaml
-    /// </summary>
     public partial class SubtitlesDefaultsView : Window
     {
-        /// <summary>
-        /// Initializes a new instance of the <see cref="SubtitlesDefaultsView"/> class.
-        /// </summary>
         public SubtitlesDefaultsView()
         {
             this.InitializeComponent();
+            this.InputBindings.Add(new InputBinding(new CloseWindowCommand(this), new KeyGesture(Key.W, ModifierKeys.Control))); // Close Window
         }
 
-        private void Apply_OnClick(object sender, RoutedEventArgs e)
+        protected override void OnSourceInitialized(EventArgs e)
         {
-            ((SubtitlesDefaultsViewModel)DataContext).IsApplied = true;
-            this.Close();
+            base.OnSourceInitialized(e);
+            WindowHelper.SetDarkMode(this);
         }
     }
 }

@@ -14,6 +14,8 @@ namespace HandBrakeWPF.Utilities
     using System.IO;
     using System.Linq;
 
+    using HandBrake.App.Core.Utilities;
+    using HandBrake.Interop.Interop;
     using HandBrake.Interop.Utilities;
 
     /// <summary>

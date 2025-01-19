@@ -10,23 +10,22 @@
 namespace HandBrakeWPF.ViewModels
 {
     using System;
-    using System.Collections.Generic;
     using System.ComponentModel;
     using System.Diagnostics;
     using System.IO;
     using System.Linq;
     using System.Text;
 
-    using Caliburn.Micro;
+    using HandBrake.App.Core.Utilities;
 
-    using HandBrake.Worker.Logging.Models;
-
+    using HandBrakeWPF.Helpers;
+    using HandBrakeWPF.Model.Logging;
     using HandBrakeWPF.Properties;
     using HandBrakeWPF.Services.Interfaces;
     using HandBrakeWPF.Services.Logging.EventArgs;
     using HandBrakeWPF.Services.Logging.Interfaces;
+    using HandBrakeWPF.Services.Logging.Model;
     using HandBrakeWPF.Services.Queue.Interfaces;
-    using HandBrakeWPF.Utilities;
     using HandBrakeWPF.ViewModels.Interfaces;
 
     using Clipboard = System.Windows.Clipboard;
@@ -43,8 +42,7 @@ namespace HandBrakeWPF.ViewModels
         private ILog logService;
         private StringBuilder log = new StringBuilder();
         private long lastReadIndex;
-
-        private string selectedLogFile;
+        private LogFile selectedLogFile;
 
         public LogViewModel(IErrorService errorService, ILogInstanceManager logInstanceManager, IQueueService queueService)
         {
@@ -56,24 +54,29 @@ namespace HandBrakeWPF.ViewModels
 
         public event EventHandler<LogEventArgs> LogMessageReceived;
 
+        public event EventHandler LogResetEvent;
+
         public string ActivityLog => this.log.ToString();
 
-        public BindingList<string> LogFiles { get; private set; }
+        public BindingList<LogFile> LogFiles { get; private set; }
 
-        public string SelectedLogFile
+        public LogFile SelectedLogFile
         {
             get => this.selectedLogFile;
             set
             {
-                if (value == this.selectedLogFile)
+                if (Equals(value, this.selectedLogFile))
                 {
                     return;
                 }
-
+                
                 this.selectedLogFile = value;
                 this.NotifyOfPropertyChange(() => this.SelectedLogFile);
 
-                this.ChangeLogFileView();
+                if (value != null)
+                {
+                    this.ChangeLogFileView();
+                }
             }
         }
 
@@ -97,17 +100,16 @@ namespace HandBrakeWPF.ViewModels
             }
         }
 
-        protected override void OnActivate()
+        public override void Activate()
         {
-            this.logInstanceManager.NewLogInstanceRegistered += this.LogInstanceManager_NewLogInstanceRegistered;
-            this.queueService.QueueChanged += this.QueueService_QueueChanged;
+            this.logInstanceManager.LogInstancesChanged += this.LogInstanceManager_NewLogInstanceRegistered;
 
             this.CollectLogFiles(null);
-            
-            base.OnActivate();
+
+            base.Activate();
         }
 
-        protected override void OnDeactivate(bool close)
+        public override void Deactivate()
         {
             if (this.logService != null)
             {
@@ -116,10 +118,14 @@ namespace HandBrakeWPF.ViewModels
             }
 
             this.SelectedLogFile = null;
-            this.logInstanceManager.NewLogInstanceRegistered -= this.LogInstanceManager_NewLogInstanceRegistered;
-            this.queueService.QueueChanged -= this.QueueService_QueueChanged;
+            this.logInstanceManager.LogInstancesChanged -= this.LogInstanceManager_NewLogInstanceRegistered;
 
-            base.OnDeactivate(close);
+            base.Deactivate();
+        }
+
+        protected virtual void OnLogResetEvent()
+        {
+            this.LogResetEvent?.Invoke(this, EventArgs.Empty);
         }
 
         protected virtual void OnLogMessageReceived(LogEventArgs e)
@@ -141,9 +147,14 @@ namespace HandBrakeWPF.ViewModels
                 return;
             }
 
-            this.logService = this.logInstanceManager.GetLogInstance(this.SelectedLogFile);
+            this.logService = this.logInstanceManager.GetLogInstance(this.SelectedLogFile.LogFileName);
+            if (this.logService == null && this.SelectedLogFile != null && this.SelectedLogFile.LogFileName.Equals(this.logInstanceManager.ApplicationLogInstance.FileName, StringComparison.InvariantCultureIgnoreCase))
+            {
+                this.logService = this.logInstanceManager.ApplicationLogInstance;
+            }
+            
             string logDir = DirectoryUtilities.GetLogDirectory();
-            string logFile = Path.Combine(logDir, this.selectedLogFile);
+            string logFile = Path.Combine(logDir, this.selectedLogFile.LogFileName);
 
             // This is not an active log, so read from disk.
             if (this.logService == null)
@@ -153,12 +164,15 @@ namespace HandBrakeWPF.ViewModels
                     if (File.Exists(logFile))
                     {
                         this.log.Clear();
-                        using (StreamReader logReader = new StreamReader(logFile))
+                        using (var fs = new FileStream(logFile, FileMode.Open, FileAccess.Read, FileShare.ReadWrite))
                         {
-                            string logContent = logReader.ReadToEnd();
-                            this.log.AppendLine(logContent);
+                            using (StreamReader logReader = new StreamReader(fs))
+                            {
+                                string logContent = logReader.ReadToEnd();
+                                this.log.AppendLine(logContent);
+                            }
                         }
-                    } 
+                    }
                     else
                     {
                         this.log.Clear();
@@ -171,8 +185,7 @@ namespace HandBrakeWPF.ViewModels
                     this.log.AppendLine(exc.ToString());
                 }
 
-                this.OnLogMessageReceived(null);
-                this.NotifyOfPropertyChange(() => this.ActivityLog);
+                this.OnLogResetEvent();
             }
 
             // Active in-progress log, read from the log service.
@@ -194,8 +207,7 @@ namespace HandBrakeWPF.ViewModels
                     }
                 }
 
-                this.OnLogMessageReceived(null);
-                this.NotifyOfPropertyChange(() => this.ActivityLog);
+                this.OnLogResetEvent();
             }
         }
 
@@ -215,20 +227,18 @@ namespace HandBrakeWPF.ViewModels
                 }
             }
 
-            this.NotifyOfPropertyChange(() => this.ActivityLog);
-            this.OnLogMessageReceived(null);
+            this.OnLogResetEvent();
         }
 
         private void LogService_MessageLogged(object sender, LogEventArgs e)
         {
             if (this.lastReadIndex < e.Log.MessageIndex)
             {
-                Execute.OnUIThreadAsync(() =>
+                ThreadHelper.OnUIThread(() =>
                         {
                             this.lastReadIndex = e.Log.MessageIndex;
                             this.log.AppendLine(e.Log.Content);
                             this.OnLogMessageReceived(e);
-                            this.NotifyOfPropertyChange(() => this.ActivityLog);
                         });
             }
         }
@@ -238,46 +248,39 @@ namespace HandBrakeWPF.ViewModels
             this.CollectLogFiles(e.FileName);
         }
         
-        private void QueueService_QueueChanged(object sender, EventArgs e)
-        {
-            this.CollectLogFiles(null);
-        }
-
         private void CollectLogFiles(string filename)
         {
             lock (readLockObject)
             {
                 BindingList<string> activeLogs = new BindingList<string>(this.logInstanceManager.GetLogFiles());
-                BindingList<string> logfiles = new BindingList<string>();
+                BindingList<LogFile> logfiles = new BindingList<LogFile>();
 
                 // Add Inactive Logs First.
                 foreach (string logFile in this.queueService.GetLogFilePaths())
                 {
-                    logfiles.Add(Path.GetFileName(logFile));
+                    logfiles.Add(new LogFile(Path.GetFileName(logFile), true));
                 }
 
                 // Add active logs second.
                 foreach (var log in activeLogs)
                 {
-                    logfiles.Add(log);
+                    logfiles.Add(new LogFile(log, false));
                 }
 
                 this.LogFiles = logfiles;
                 this.NotifyOfPropertyChange(() => this.LogFiles);
 
+
                 if (!string.IsNullOrEmpty(filename))
                 {
-                    this.SelectedLogFile = this.LogFiles.FirstOrDefault(c => c.Equals(filename, StringComparison.InvariantCultureIgnoreCase));
+                    this.SelectedLogFile = this.LogFiles.FirstOrDefault(c => c.LogFileName.Equals(filename, StringComparison.InvariantCultureIgnoreCase));
                 }
                 else
                 {
-                    this.SelectedLogFile = this.LogFiles.LastOrDefault(c => !c.Contains("activity_log_main"));
+                    this.SelectedLogFile = this.LogFiles.LastOrDefault(c => !c.LogFileName.Contains("activity_log_main"));
                 }
 
-                if (this.SelectedLogFile == null)
-                {
-                    this.SelectedLogFile = this.LogFiles.LastOrDefault();
-                }
+                this.SelectedLogFile ??= this.LogFiles.LastOrDefault();
             }
         }
     }

@@ -5,7 +5,7 @@
  It may be used under the terms of the GNU General Public License. */
 
 #import "HBImageUtilities.h"
-#import <Cocoa/Cocoa.h>
+#import <CoreVideo/CoreVideo.h>
 #include "handbrake/handbrake.h"
 
 CGImageRef CreateScaledCGImageFromCGImage(CGImageRef image, CGFloat thumbnailHeight)
@@ -163,28 +163,26 @@ CGColorSpaceRef copyColorSpace(int primaries, int transfer, int matrix)
             break;
             }
 
+        case HB_COLR_TRA_IEC61966_2_1:
+            transferValue = kCVImageBufferTransferFunction_sRGB;
+            break;
+
         case HB_COLR_TRA_BT2020_10:
         case HB_COLR_TRA_BT2020_12:
             transferValue = kCVImageBufferTransferFunction_ITU_R_2020;
             break;
 
         case HB_COLR_TRA_SMPTEST2084:
-            if (@available(macOS 10.13, *)) {
             transferValue = kCVImageBufferTransferFunction_SMPTE_ST_2084_PQ;
             break;
-            }
 
         case HB_COLR_TRA_ARIB_STD_B67:
-            if (@available(macOS 10.13, *)) {
             transferValue = kCVImageBufferTransferFunction_ITU_R_2100_HLG;
             break;
-            }
 
         case HB_COLR_TRA_SMPTE428:
-            if (@available(macOS 10.12, *)) {
             transferValue = kCVImageBufferTransferFunction_SMPTE_ST_428_1;
             break;
-            }
 
         case HB_COLR_TRA_BT709:
         default:

@@ -1,6 +1,6 @@
 /* cropscale.c
 
-   Copyright (c) 2003-2015 HandBrake Team
+   Copyright (c) 2003-2024 HandBrake Team
    This file is part of the HandBrake source code
    Homepage: <http://handbrake.fr/>.
    It may be used under the terms of the GNU General Public License v2.
@@ -9,6 +9,7 @@
 
 #include "handbrake/common.h"
 #include "handbrake/avfilter_priv.h"
+#include "handbrake/hbffmpeg.h"
 #if HB_PROJECT_FEATURE_QSV && (defined( _WIN32 ) || defined( __MINGW32__ ))
 #include "handbrake/qsv_common.h"
 #include "libavutil/hwcontext_qsv.h"
@@ -63,14 +64,17 @@ static int crop_scale_init(hb_filter_object_t * filter, hb_filter_init_t * init)
 
     hb_dict_t        * settings = filter->settings;
     hb_value_array_t * avfilters = hb_value_array_init();
-    int                width, height, top, bottom, left, right;
-    const char       * matrix;
+    int                width, height;
+    int                cropped_width, cropped_height;
+    int                top = 0, bottom = 0, left = 0, right = 0;
 
     // Convert crop settings to 'crop' avfilter
     hb_dict_extract_int(&top, settings, "crop-top");
     hb_dict_extract_int(&bottom, settings, "crop-bottom");
     hb_dict_extract_int(&left, settings, "crop-left");
     hb_dict_extract_int(&right, settings, "crop-right");
+    cropped_width  = init->geometry.width - left - right;
+    cropped_height = init->geometry.height - top - bottom;
     if (top > 0 || bottom > 0 || left > 0 || right > 0)
     {
         hb_dict_t * avfilter   = hb_dict_init();
@@ -78,11 +82,14 @@ static int crop_scale_init(hb_filter_object_t * filter, hb_filter_init_t * init)
 
         hb_dict_set_int(avsettings, "x", left);
         hb_dict_set_int(avsettings, "y", top);
-        hb_dict_set_int(avsettings, "w", init->geometry.width - left - right);
-        hb_dict_set_int(avsettings, "h", init->geometry.height - top - bottom);
+        hb_dict_set_int(avsettings, "w", cropped_width);
+        hb_dict_set_int(avsettings, "h", cropped_height);
         hb_dict_set(avfilter, "crop", avsettings);
         hb_value_array_append(avfilters, avfilter);
     }
+
+    width  = cropped_width;
+    height = cropped_height;
 
     // Convert scale settings to 'scale' avfilter
     hb_dict_extract_int(&width, settings, "width");
@@ -92,108 +99,87 @@ static int crop_scale_init(hb_filter_object_t * filter, hb_filter_init_t * init)
     hb_dict_t * avsettings = hb_dict_init();
 
 #if HB_PROJECT_FEATURE_QSV && (defined( _WIN32 ) || defined( __MINGW32__ ))
-    if (hb_qsv_hw_filters_are_enabled(init->job))
+    if (hb_qsv_hw_filters_via_video_memory_are_enabled(init->job) || hb_qsv_hw_filters_via_system_memory_are_enabled(init->job))
     {
-        int result = hb_create_ffmpeg_pool(init->job, width, height, init->pix_fmt, HB_QSV_POOL_SURFACE_SIZE, 0, &init->job->qsv.ctx->hb_vpp_qsv_frames_ctx->hw_frames_ctx);
-        if (result < 0)
+        if (hb_qsv_hw_filters_via_video_memory_are_enabled(init->job))
         {
-            hb_error("hb_create_ffmpeg_pool vpp allocation failed");
-            return result;
+            int result = hb_qsv_create_ffmpeg_vpp_pool(init, width, height);
+            if (result < 0)
+            {
+                hb_error("hb_create_ffmpeg_pool vpp allocation failed");
+                return result;
+            }
+        }
+
+        if (top > 0 || bottom > 0 || left > 0 || right > 0)
+        {
+            hb_dict_set_int(avsettings, "cx", left);
+            hb_dict_set_int(avsettings, "cy", top);
+            hb_dict_set_int(avsettings, "cw", cropped_width);
+            hb_dict_set_int(avsettings, "ch", cropped_height);
         }
 
         hb_dict_set_int(avsettings, "w", width);
         hb_dict_set_int(avsettings, "h", height);
+        hb_dict_set_int(avsettings, "async_depth", init->job->qsv.async_depth);
+        int hw_generation = hb_qsv_hardware_generation(hb_qsv_get_platform(hb_qsv_get_adapter_index()));
         if (init->job->qsv.ctx->vpp_scale_mode)
         {
-            hb_dict_set_string(avsettings, "mode", init->job->qsv.ctx->vpp_scale_mode);
+            hb_dict_set_string(avsettings, "scale_mode", init->job->qsv.ctx->vpp_scale_mode);
+            hb_log("qsv: scaling filter mode %s", init->job->qsv.ctx->vpp_scale_mode);
+        }
+        else if (hw_generation >= QSV_G8)
+        {
+            hb_dict_set_string(avsettings, "scale_mode", "compute");
+            hb_log("qsv: scaling filter mode %s", "compute");
         }
         if (init->job->qsv.ctx->vpp_interpolation_method)
         {
             hb_dict_set_string(avsettings, "method", init->job->qsv.ctx->vpp_interpolation_method);
         }
-        hb_log("qsv: scaling filter mode %s", init->job->qsv.ctx->vpp_scale_mode ? init->job->qsv.ctx->vpp_scale_mode : "default");
-        hb_log("qsv: scaling filter interpolation method %s", init->job->qsv.ctx->vpp_interpolation_method ? init->job->qsv.ctx->vpp_interpolation_method : "default");
-        hb_dict_set(avfilter, "scale_qsv", avsettings);
-
-        AVHWFramesContext *frames_ctx;
-        AVQSVFramesContext *frames_hwctx;
-        AVBufferRef *hw_frames_ctx;
-
-        hw_frames_ctx = init->job->qsv.ctx->hb_vpp_qsv_frames_ctx->hw_frames_ctx;
-        frames_ctx   = (AVHWFramesContext*)hw_frames_ctx->data;
-        frames_hwctx = frames_ctx->hwctx;
-        mfxHDLPair* handle_pair = (mfxHDLPair*)frames_hwctx->surfaces[0].Data.MemId;
-        init->job->qsv.ctx->hb_vpp_qsv_frames_ctx->input_texture = ((size_t)handle_pair->second != MFX_INFINITE) ? handle_pair->first : NULL;
-
-        /* allocate the memory ids for the external frames */
-        av_buffer_unref(&init->job->qsv.ctx->hb_vpp_qsv_frames_ctx->mids_buf);
-        init->job->qsv.ctx->hb_vpp_qsv_frames_ctx->mids_buf = hb_qsv_create_mids(init->job->qsv.ctx->hb_vpp_qsv_frames_ctx->hw_frames_ctx);
-        if (!init->job->qsv.ctx->hb_vpp_qsv_frames_ctx->mids_buf)
-            return AVERROR(ENOMEM);
-        init->job->qsv.ctx->hb_vpp_qsv_frames_ctx->mids    = (QSVMid*)init->job->qsv.ctx->hb_vpp_qsv_frames_ctx->mids_buf->data;
-        init->job->qsv.ctx->hb_vpp_qsv_frames_ctx->nb_mids = frames_hwctx->nb_surfaces;
-        memset(init->job->qsv.ctx->hb_vpp_qsv_frames_ctx->pool, 0, init->job->qsv.ctx->hb_vpp_qsv_frames_ctx->nb_mids * sizeof(init->job->qsv.ctx->hb_vpp_qsv_frames_ctx->pool[0]));
+        hb_dict_set(avfilter, "vpp_qsv", avsettings);
     }
     else
 #endif
     {
-        hb_dict_set_int(avsettings, "width", width);
-        hb_dict_set_int(avsettings, "height", height);
-        hb_dict_set_string(avsettings, "flags", "lanczos+accurate_rnd");
-
-        switch (init->color_matrix)
+        if (init->hw_pix_fmt == AV_PIX_FMT_CUDA)
         {
-            case HB_COLR_MAT_BT709:
-                matrix = "bt709";
-                break;
-            case HB_COLR_MAT_FCC:
-                matrix = "fcc";
-                break;
-            case HB_COLR_MAT_SMPTE240M:
-                matrix = "smpte240m";
-                break;
-            case HB_COLR_MAT_BT470BG:
-            case HB_COLR_MAT_SMPTE170M:
-                matrix = "smpte170m";
-                break;
-            case HB_COLR_MAT_BT2020_NCL:
-            case HB_COLR_MAT_BT2020_CL:
-                matrix = "bt2020";
-                break;
-            default:
-            case HB_COLR_MAT_UNDEF:
-                matrix = NULL;
-                break;
+            hb_dict_set_int(avsettings, "w", width);
+            hb_dict_set_int(avsettings, "h", height);
+            hb_dict_set_string(avsettings, "interp_algo", "lanczos");
+            hb_dict_set_string(avsettings, "format", av_get_pix_fmt_name(init->pix_fmt));
+            hb_dict_set(avfilter, "scale_cuda", avsettings);
         }
-        if (matrix != NULL)
+        else if (hb_av_can_use_zscale(init->pix_fmt,
+                                      init->geometry.width, init->geometry.height,
+                                      width, height))
         {
-            hb_dict_set_string(avsettings, "in_color_matrix", matrix);
-            hb_dict_set_string(avsettings, "out_color_matrix", matrix);
+            hb_dict_set_int(avsettings, "width", width);
+            hb_dict_set_int(avsettings, "height", height);
+            hb_dict_set_string(avsettings, "filter", "lanczos");
+            hb_dict_set(avfilter, "zscale", avsettings);
         }
-        hb_dict_set_string(avsettings, "out_range", "limited");
-        hb_dict_set(avfilter, "scale", avsettings);
+        else
+        {
+            hb_dict_set_int(avsettings, "width", width);
+            hb_dict_set_int(avsettings, "height", height);
+            hb_dict_set_string(avsettings, "flags", "lanczos+accurate_rnd");
+            hb_dict_set(avfilter, "scale", avsettings);
+        }
     }
     
     hb_value_array_append(avfilters, avfilter);
-
-    avfilter   = hb_dict_init();
-    avsettings = hb_dict_init();
-
-#if HB_PROJECT_FEATURE_QSV && (defined( _WIN32 ) || defined( __MINGW32__ ))
-    if (!hb_qsv_hw_filters_are_enabled(init->job))
-#endif
-    {
-        hb_dict_set(avsettings, "pix_fmts", hb_value_string(av_get_pix_fmt_name(init->pix_fmt)));
-        hb_dict_set(avfilter, "format", avsettings);
-        hb_value_array_append(avfilters, avfilter);
-    }
 
     init->crop[0] = top;
     init->crop[1] = bottom;
     init->crop[2] = left;
     init->crop[3] = right;
+    hb_limit_rational(&init->geometry.par.num, &init->geometry.par.den,
+        (int64_t)init->geometry.par.num * height * cropped_width,
+        (int64_t)init->geometry.par.den * width  * cropped_height, 65535);
     init->geometry.width = width;
     init->geometry.height = height;
+
     pv->output = *init;
 
     pv->avfilters = avfilters;

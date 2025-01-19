@@ -13,7 +13,8 @@ namespace HandBrakeWPF.Commands
     using System.Diagnostics;
     using System.Windows;
     using System.Windows.Input;
-    using System.Windows.Interactivity;
+
+    using Microsoft.Xaml.Behaviors;
 
     /// <summary>
     /// The input binding trigger.
@@ -47,7 +48,6 @@ namespace HandBrakeWPF.Commands
         /// </returns>
         public bool CanExecute(object parameter)
         {
-            // action is anyway blocked by Caliburn at the invoke level
             return true;
         }
 

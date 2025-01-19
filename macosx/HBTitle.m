@@ -18,29 +18,33 @@
 
 @interface HBMetadata ()
 
-@property (nonatomic, readonly) hb_metadata_t *hb_metadata;
-@property (nonatomic, copy) NSString *releaseDate;
+@property (nonatomic, readonly, nullable) hb_metadata_t *metadata;
+@property (nonatomic, copy, nullable) NSString *releaseDate;
 
 @end
 
 @implementation HBMetadata
-- (instancetype)initWithMetadata:(hb_metadata_t *)data
+- (instancetype)initWithMetadata:(hb_metadata_t *)metadata
 {
     self = [super init];
     if (self)
     {
-        _hb_metadata = data;
+        _metadata = metadata;
     }
     return self;
 }
 
 - (NSString *)releaseDate
 {
-    if (self.hb_metadata->release_date == nil)
+    if (_metadata && _metadata->dict)
     {
-        return nil;
+        const char *releaseDate = hb_dict_get_string(_metadata->dict, "ReleaseDate");
+        if (releaseDate)
+        {
+            return @(releaseDate);
+        }
     }
-    return @(self.hb_metadata->release_date);
+    return nil;
 }
 
 @end
@@ -52,6 +56,7 @@
     self = [super init];
     if (self)
     {
+        _index = -1;
         _displayName = [displayName copy];
         _title = @"";
         _isoLanguageCode = @"";
@@ -64,6 +69,7 @@
     self = [super init];
     if (self)
     {
+        _index = audio->index;
         _displayName = [NSString stringWithFormat: @"%d: %@", index, @(audio->lang.description)];
         _title = audio->in.name ? @(audio->in.name) : nil;
         _bitRate = audio->in.bitrate / 1000;
@@ -81,6 +87,7 @@
 
 - (void)encodeWithCoder:(nonnull NSCoder *)coder
 {
+    encodeInt(_index);
     encodeObject(_displayName);
     encodeObject(_title);
     encodeInt(_bitRate);
@@ -97,6 +104,7 @@
     self = [super init];
     if (self)
     {
+        decodeInt(_index);
         decodeObjectOrFail(_displayName, NSString);
         decodeObject(_title, NSString);
         decodeInt(_bitRate);
@@ -130,6 +138,7 @@ fail:
     self = [super init];
     if (self)
     {
+        _index = -1;
         _displayName = [displayName copy];
         _type = type;
         _isoLanguageCode = @"und";
@@ -143,6 +152,7 @@ fail:
     self = [super init];
     if (self)
     {
+        _index = index;
         _displayName = [NSString stringWithFormat:@"%d: %@", index, @(subtitle->lang)];
         _title = subtitle->name ? @(subtitle->name) : nil;
         _type = subtitle->source;
@@ -196,6 +206,7 @@ fail:
 
 - (void)encodeWithCoder:(nonnull NSCoder *)coder
 {
+    encodeInt(_index);
     encodeObject(_displayName);
     encodeObject(_title);
     encodeInt(_type);
@@ -219,6 +230,7 @@ fail:
     self = [super init];
     if (self)
     {
+        decodeInt(_index);
         decodeObjectOrFail(_displayName, NSString);
         decodeObject(_title, NSString);
         decodeInt(_type);
@@ -340,6 +352,54 @@ fail:
     NSString *fps = [NSString localizedStringWithFormat:HBKitLocalizedString(@"%.6g FPS", @"Title short description -> video format"), _hb_title->vrate.num / (double)_hb_title->vrate.den];
     [format appendString:fps];
 
+    NSString *dynamicRange = @"SDR";
+
+    if (_hb_title->hdr_10_plus)
+    {
+        dynamicRange = @"HDR10+";
+    }
+    else if (_hb_title->mastering.has_primaries && _hb_title->mastering.has_luminance)
+    {
+        dynamicRange = @"HDR10";
+    }
+    else if (_hb_title->color_transfer == 16 || _hb_title->color_transfer == 18)
+    {
+        dynamicRange = @"HDR";
+    }
+
+    if (_hb_title->dovi.dv_profile && _hb_title->hdr_10_plus)
+    {
+        dynamicRange = [NSString stringWithFormat:@"Dolby Vision %d.%d HDR10+", _hb_title->dovi.dv_profile, _hb_title->dovi.dv_bl_signal_compatibility_id];
+    }
+    else if (_hb_title->dovi.dv_profile)
+    {
+        dynamicRange = [NSString stringWithFormat:@"Dolby Vision %d.%d", _hb_title->dovi.dv_profile, _hb_title->dovi.dv_bl_signal_compatibility_id];
+    }
+
+    [format appendFormat:@", %@ (", dynamicRange];
+
+    int bit_depth = hb_get_bit_depth(_hb_title->pix_fmt);
+    if (bit_depth)
+    {
+        [format appendFormat:@"%d-bit ", hb_get_bit_depth(_hb_title->pix_fmt)];
+    }
+
+    int h_shift, v_shift, chroma_available;
+    chroma_available = hb_get_chroma_sub_sample(_hb_title->pix_fmt, &h_shift, &v_shift);
+    if (chroma_available == 0)
+    {
+        int h_value = 4 >> h_shift;
+        int v_value = v_shift ? 0 : h_value;
+        [format appendFormat:@"4:%d:%d", h_value, v_value];
+    }
+
+    if (bit_depth || chroma_available == 0)
+    {
+        [format appendString:@", "];
+    }
+
+    [format appendFormat:@"%d-%d-%d)", _hb_title->color_prim, _hb_title->color_transfer, _hb_title->color_matrix];
+
     hb_list_t *audioList = _hb_title->list_audio;
     int audioCount = hb_list_count(audioList);
 
@@ -375,6 +435,11 @@ fail:
 - (int)index
 {
     return self.hb_title->index;
+}
+
+- (BOOL)keepDuplicateTitles
+{
+    return self.hb_title->keep_duplicate_titles;
 }
 
 - (int)angles
@@ -437,6 +502,26 @@ fail:
 - (int)autoCropRight
 {
     return _hb_title->crop[3];
+}
+
+- (int)looseAutoCropTop
+{
+    return _hb_title->loose_crop[0];
+}
+
+- (int)looseAutoCropBottom
+{
+    return _hb_title->loose_crop[1];
+}
+
+- (int)looseAutoCropLeft
+{
+    return _hb_title->loose_crop[2];
+}
+
+- (int)looseAutoCropRight
+{
+    return _hb_title->loose_crop[3];
 }
 
 - (NSArray<HBTitleAudioTrack *> *)audioTracks
@@ -517,11 +602,11 @@ fail:
     return _chapters;
 }
 
-- (NSDictionary *)jobSettingsWithPreset:(HBPreset *)preset
+- (nullable NSDictionary *)jobSettingsWithPreset:(HBPreset *)preset
 {
     NSDictionary *result = nil;
 
-    hb_dict_t *hb_preset = [preset content].hb_value;
+    hb_dict_t *hb_preset = preset.content.hb_value;
     hb_dict_t *job = hb_preset_job_init(self.hb_handle, self.hb_title->index, hb_preset);
 
     if (job)

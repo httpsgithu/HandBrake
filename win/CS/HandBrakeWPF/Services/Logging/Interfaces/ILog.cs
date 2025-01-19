@@ -12,7 +12,7 @@ namespace HandBrakeWPF.Services.Logging.Interfaces
     using System;
     using System.Collections.Generic;
 
-    using HandBrake.Worker.Logging.Models;
+    using HandBrakeWPF.Model.Logging;
 
     using LogEventArgs = EventArgs.LogEventArgs;
 
@@ -47,10 +47,14 @@ namespace HandBrakeWPF.Services.Logging.Interfaces
         /// <param name="fullLogPath">
         /// The full Log Path.
         /// </param>
+        /// <param name="includeGpuInfo">
+        /// GPU polling can be very slow on some systems.
+        /// By Default, we will not include it on startup, but any scan/encode there after will include it.
+        /// </param>
         /// <remarks>
         /// If this is not called, all log messages from libhb will be ignored.
         /// </remarks>
-        void ConfigureLogging(string filename, string fullLogPath);
+        void ConfigureLogging(string filename, string fullLogPath, bool includeGpuInfo);
 
         /// <summary>
         /// Log a message.
@@ -58,7 +62,7 @@ namespace HandBrakeWPF.Services.Logging.Interfaces
         /// <param name="content">
         /// The content of the log message,
         /// </param>
-        void LogMessage(string content);
+        void LogMessage(string content, bool enableTimeCode = false);
 
         string GetFullLog();
 

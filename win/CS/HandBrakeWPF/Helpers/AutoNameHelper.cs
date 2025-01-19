@@ -12,21 +12,18 @@ namespace HandBrakeWPF.Helpers
     using System;
     using System.IO;
     using System.Linq;
-    using System.Reflection;
-    using System.Runtime.CompilerServices;
 
-    using Caliburn.Micro;
+    using HandBrake.App.Core.Extensions;
 
-    using HandBrakeWPF.Converters;
-    using HandBrakeWPF.Extensions;
     using HandBrakeWPF.Model.Options;
     using HandBrakeWPF.Properties;
+    using HandBrakeWPF.Services.Encode.Model.Models;
     using HandBrakeWPF.Services.Interfaces;
     using HandBrakeWPF.Services.Presets.Model;
 
-    using EncodeTask = HandBrakeWPF.Services.Encode.Model.EncodeTask;
-    using OutputFormat = HandBrakeWPF.Services.Encode.Model.Models.OutputFormat;
-    using VideoEncodeRateType = HandBrakeWPF.Model.Video.VideoEncodeRateType;
+    using EncodeTask = Services.Encode.Model.EncodeTask;
+    using OutputFormat = Services.Encode.Model.Models.OutputFormat;
+    using VideoEncodeRateType = Model.Video.VideoEncodeRateType;
 
     /// <summary>
     /// The Destination AutoName Helper
@@ -37,13 +34,16 @@ namespace HandBrakeWPF.Helpers
         /// Function which generates the filename and path automatically based on 
         /// the Source Name, DVD title and DVD Chapters
         /// </summary>
-        public static string AutoName(EncodeTask task, string sourceOrLabelName, Preset presetName)
+        public static string AutoName(EncodeTask task, string titleName, string sourceDisplayName, Preset presetName)
         {
-            IUserSettingService userSettingService = IoC.Get<IUserSettingService>();
+            IUserSettingService userSettingService = IoCHelper.Get<IUserSettingService>();
             if (task.Destination == null)
             {
                 task.Destination = string.Empty;
             }
+
+
+            string sourceOrLabelName = !string.IsNullOrEmpty(titleName) ? titleName.Trim() : sourceDisplayName?.Trim();
 
             if (task.Title != 0)
             {
@@ -63,15 +63,10 @@ namespace HandBrakeWPF.Helpers
                     combinedChapterTag = chapterStart + "-" + chapterFinish;
                 }
 
-                // Creation Date / Time
-                var creationDateTime = ObtainCreateDateObject(task);
-                string createDate = creationDateTime.Date.ToShortDateString().Replace('/', '-');
-                string createTime = creationDateTime.ToString("HH-mm"); 
-
                 /*
                  * Generate the full path and filename
                  */
-                string destinationFilename = GenerateDestinationFileName(task, userSettingService, sourceName, dvdTitle, combinedChapterTag, createDate, createTime);
+                string destinationFilename = GenerateDestinationFileName(task, userSettingService, sourceName, dvdTitle, combinedChapterTag, presetName);
                 string autoNamePath = GetAutonamePath(userSettingService, task, sourceName);
                 string finalPath = Path.Combine(autoNamePath, destinationFilename);
 
@@ -90,7 +85,7 @@ namespace HandBrakeWPF.Helpers
         /// </returns>
         public static bool IsAutonamingEnabled()
         {
-            IUserSettingService userSettingService = IoC.Get<IUserSettingService>();
+            IUserSettingService userSettingService = IoCHelper.Get<IUserSettingService>();
 
             if (!userSettingService.GetUserSetting<bool>(UserSettingConstants.AutoNaming))
             {
@@ -129,33 +124,62 @@ namespace HandBrakeWPF.Helpers
             return sourceName;
         }
 
-        private static string GenerateDestinationFileName(EncodeTask task, IUserSettingService userSettingService, string sourceName, string dvdTitle, string combinedChapterTag, string createDate, string createTime)
+        private static string GenerateDestinationFileName(EncodeTask task, IUserSettingService userSettingService, string sourceName, string dvdTitle, string combinedChapterTag, Preset presetName)
         {
             string destinationFilename;
             if (userSettingService.GetUserSetting<string>(UserSettingConstants.AutoNameFormat) != string.Empty)
             {
+                string presetNameStr = presetName?.Name ?? string.Empty;
+                presetNameStr = Path.GetInvalidFileNameChars().Aggregate(
+                    presetNameStr,
+                    (current, character) => current.Replace(character.ToString(), string.Empty));
+
+                int? bitDepth = task.VideoEncoder?.BitDepth;
+                
+                // Creation Date / Time
+                var creationDateTime = ObtainCreateDateObject(task);
+                string createDate = userSettingService.GetUserSetting<bool>(UserSettingConstants.UseIsoDateFormat) ? creationDateTime.Date.ToString("yyyy-MM-dd") : creationDateTime.Date.ToShortDateString().Replace('/', '-');
+               
+                string createTime = creationDateTime.ToString("HH-mm");
+
+                // Modification Date / Time
+                var modificationDateTime = GetFileModificationDate(task);
+                string modifyDate = userSettingService.GetUserSetting<bool>(UserSettingConstants.UseIsoDateFormat) ? modificationDateTime.Date.ToString("yyyy-MM-dd") : modificationDateTime.Date.ToShortDateString().Replace('/', '-');
+                string modifyTime = modificationDateTime.ToString("HH-mm");
+
+                string angle = task.Angle.ToString();
+
                 destinationFilename = userSettingService.GetUserSetting<string>(UserSettingConstants.AutoNameFormat);
                 destinationFilename =
                     destinationFilename
                         .Replace(Constants.Source, sourceName)
                         .Replace(Constants.Title, dvdTitle)
+                        .Replace(Constants.Angle, angle)
                         .Replace(Constants.Chapters, combinedChapterTag)
                         .Replace(Constants.Date, DateTime.Now.Date.ToShortDateString().Replace('/', '-'))
                         .Replace(Constants.Time, DateTime.Now.ToString("HH-mm"))
-                        .Replace(Constants.CretaionDate, createDate)
-                        .Replace(Constants.CreationTime, createTime);
+                        .Replace(Constants.CreationDate, createDate)
+                        .Replace(Constants.CreationTime, createTime)
+                        .Replace(Constants.ModificationDate, modifyDate)
+                        .Replace(Constants.ModificationTime, modifyTime)
+                        .Replace(Constants.Preset, presetNameStr)
+                        .Replace(Constants.EncoderBitDepth, bitDepth?.ToString())
+                        .Replace(Constants.StorageWidth, task.Width?.ToString())
+                        .Replace(Constants.StorageHeight, task.Height?.ToString())
+                        .Replace(Constants.Codec, task.VideoEncoder?.Codec)
+                        .Replace(Constants.EncoderDisplay, task.VideoEncoder?.DisplayName)
+                        .Replace(Constants.Encoder, task.VideoEncoder?.ShortName);
+
 
                 if (task.VideoEncodeRateType == VideoEncodeRateType.ConstantQuality)
                 {
-                    destinationFilename = destinationFilename.Replace(Constants.Quality, task.Quality.ToString());
-                    destinationFilename = destinationFilename.Replace(Constants.Bitrate, string.Empty);
+                    destinationFilename = destinationFilename.Replace(Constants.QualityBitrate, task.Quality.ToString());
+                    destinationFilename = destinationFilename.Replace(Constants.QualityType, "Q");
                 }
                 else
                 {
-                    destinationFilename = destinationFilename.Replace(
-                        Constants.Bitrate,
-                        task.VideoBitrate.ToString());
-                    destinationFilename = destinationFilename.Replace(Constants.Quality, string.Empty);
+                    destinationFilename = destinationFilename.Replace(Constants.QualityBitrate, task.VideoBitrate.ToString());
+                    destinationFilename = destinationFilename.Replace(Constants.QualityType, "kbps");
                 }
             }
             else
@@ -170,9 +194,6 @@ namespace HandBrakeWPF.Helpers
             {
                 switch ((Mp4Behaviour)userSettingService.GetUserSetting<int>(UserSettingConstants.UseM4v))
                 {
-                    case Mp4Behaviour.Auto: // Automatic
-                        destinationFilename += task.IncludeChapterMarkers || MP4Helper.RequiresM4v(task) ? ".m4v" : ".mp4";
-                        break;
                     case Mp4Behaviour.MP4: // Always MP4
                         destinationFilename += ".mp4";
                         break;
@@ -195,8 +216,7 @@ namespace HandBrakeWPF.Helpers
 
         private static string GetAutonamePath(IUserSettingService userSettingService, EncodeTask task, string sourceName)
         {
-            string autoNamePath = userSettingService.GetUserSetting<string>(UserSettingConstants.AutoNamePath).Trim()
-                .Replace("/", "\\");
+            string autoNamePath = userSettingService.GetUserSetting<string>(UserSettingConstants.AutoNamePath).Trim().Replace("/", "\\");
 
             // If enabled, use the current Destination path.
             if (!userSettingService.GetUserSetting<bool>(UserSettingConstants.AlwaysUseDefaultPath) && !string.IsNullOrEmpty(task.Destination))
@@ -209,22 +229,22 @@ namespace HandBrakeWPF.Helpers
             }
 
             // Handle {source_path} 
-            if (autoNamePath.StartsWith("{source_path}") && !string.IsNullOrEmpty(task.Source))
+            if (autoNamePath.StartsWith(Constants.SourcePath) && !string.IsNullOrEmpty(task.Source))
             {
-                string savedPath = autoNamePath.Replace("{source_path}\\", string.Empty).Replace("{source_path}", string.Empty);
+                string savedPath = autoNamePath.Replace(Constants.SourcePath + "\\", string.Empty).Replace(Constants.SourcePath, string.Empty);
                 string directory = Directory.Exists(task.Source) ? task.Source : Path.GetDirectoryName(task.Source);
                 autoNamePath = Path.Combine(directory, savedPath);
             }
 
             // Handle {source}
-            if (userSettingService.GetUserSetting<string>(UserSettingConstants.AutoNamePath).Contains("{source}") && !string.IsNullOrEmpty(task.Source))
+            if (autoNamePath.Contains(Constants.Source) && !string.IsNullOrEmpty(task.Source))
             {
                 sourceName = Path.GetInvalidPathChars().Aggregate(sourceName, (current, character) => current.Replace(character.ToString(), string.Empty));
-                autoNamePath = autoNamePath.Replace("{source}", sourceName);
+                autoNamePath = autoNamePath.Replace(Constants.Source, sourceName);
             }
 
             // Handle {source_folder_name}
-            if (userSettingService.GetUserSetting<string>(UserSettingConstants.AutoNamePath).Contains("{source_folder_name}") && !string.IsNullOrEmpty(task.Source))
+            if (autoNamePath.Contains(Constants.SourceFolderName) && !string.IsNullOrEmpty(task.Source))
             {
                 // Second Case: We have a Path, with "{source_folder}" in it, therefore we need to replace it with the folder name from the source.
                 string path = Path.GetDirectoryName(task.Source);
@@ -233,7 +253,7 @@ namespace HandBrakeWPF.Helpers
                     string[] filesArray = path.Split(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
                     string sourceFolder = filesArray[filesArray.Length - 1];
 
-                    autoNamePath = userSettingService.GetUserSetting<string>(UserSettingConstants.AutoNamePath).Replace("{source_folder_name}", sourceFolder);
+                    autoNamePath = autoNamePath.Replace(Constants.SourceFolderName, sourceFolder);
                 }
             }
 
@@ -291,12 +311,16 @@ namespace HandBrakeWPF.Helpers
 
         private static DateTime ObtainCreateDateObject(EncodeTask task)
         {
-            var rd = task.MetaData.ReleaseDate;
-            if (DateTime.TryParse(rd, out var d))
-            {
-                return d;
-            }
 
+            MetaDataValue dateMetadata = task.MetaData.FirstOrDefault(m => m.Annotation == "ReleaseDate");
+            if (dateMetadata != null)
+            {
+                if (DateTime.TryParse(dateMetadata.Value, out var d))
+                {
+                    return d;
+                }
+            }
+            
             try
             {
                 return File.GetCreationTime(task.Source);
@@ -309,7 +333,34 @@ namespace HandBrakeWPF.Helpers
                     return default(DateTime);
                 }
 
-                throw e;
+                throw;
+            }
+        }
+
+        private static DateTime GetFileModificationDate(EncodeTask task)
+        {
+            MetaDataValue dateMetadata = task.MetaData.FirstOrDefault(m => m.Annotation == "ReleaseDate");
+            if (dateMetadata != null)
+            {
+                if (DateTime.TryParse(dateMetadata.Value, out var d))
+                {
+                    return d;
+                }
+            }
+
+            try
+            {
+                return File.GetLastWriteTime(task.Source);
+            }
+            catch (Exception e)
+            {
+                if (e is UnauthorizedAccessException || e is PathTooLongException || e is NotSupportedException)
+                {
+                    // Suspect the most likely concerns trying to grab the creation date in which we would want to swallow exception.
+                    return default(DateTime);
+                }
+
+                throw;
             }
         }
     }

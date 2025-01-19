@@ -9,14 +9,11 @@
 
 namespace HandBrakeWPF.Views
 {
+    using HandBrakeWPF.Helpers;
     using System;
-    using System.Diagnostics.CodeAnalysis;
     using System.Windows;
     using System.Windows.Controls;
     using System.Windows.Input;
-
-    using HandBrakeWPF.Commands;
-    using HandBrakeWPF.ViewModels.Interfaces;
 
     public partial class ErrorView : Window
     {
@@ -24,6 +21,12 @@ namespace HandBrakeWPF.Views
         {  
             this.InitializeComponent();
             this.InputBindings.Add(new InputBinding(new CopyError(this.errorText), new KeyGesture(Key.C, ModifierKeys.Control))); // Copy Error
+        }
+
+        protected override void OnSourceInitialized(EventArgs e)
+        {
+            base.OnSourceInitialized(e);
+            WindowHelper.SetDarkMode(this);
         }
     }
 

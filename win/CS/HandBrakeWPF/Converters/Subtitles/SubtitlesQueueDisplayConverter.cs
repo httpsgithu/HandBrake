@@ -35,18 +35,23 @@ namespace HandBrakeWPF.Converters.Subtitles
         public object Convert(object value, Type targetType, object parameter, CultureInfo culture)
         {
             ObservableCollection<SubtitleTrack> tracks = value as ObservableCollection<SubtitleTrack>;
-            StringBuilder sutitleTracks = new StringBuilder();
+            StringBuilder subtitleTracks = new StringBuilder();
             if (tracks != null)
             {
                 foreach (SubtitleTrack track in tracks)
                 {
                     string text = track.SourceTrack != null
                                       ? track.SourceTrack.ToString()
-                                      : (track.SrtFileName + ".srt");
+                                      : (track.SrtFileName);
 
                     if (!string.IsNullOrEmpty(track.SrtFileName))
                     {
                         text += string.Format(", {0}", track.SrtCharCode);
+                    }
+
+                    if (!string.IsNullOrEmpty(track.Name))
+                    {
+                        text = string.Format("{0} - \"{1}\"", text, track.Name);
                     }
 
                     if (track.Burned)
@@ -64,11 +69,11 @@ namespace HandBrakeWPF.Converters.Subtitles
                         text = text + string.Format(", {0}", Resources.SummaryView_Default);
                     }
                     
-                    sutitleTracks.AppendLine(text);
+                    subtitleTracks.AppendLine(text);
                 }
             }
 
-            return string.IsNullOrEmpty(sutitleTracks.ToString()) ? "None" : sutitleTracks.ToString().Trim();
+            return string.IsNullOrEmpty(subtitleTracks.ToString()) ? "None" : subtitleTracks.ToString().Trim();
         }
 
         /// <summary>

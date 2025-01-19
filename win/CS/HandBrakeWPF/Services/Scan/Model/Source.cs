@@ -11,8 +11,10 @@ namespace HandBrakeWPF.Services.Scan.Model
 {
     using System.Collections.Generic;
     using System.IO;
-    using System.Xaml;
     using System.Xml.Serialization;
+
+    using HandBrake.App.Core.Model;
+    using HandBrake.App.Core.Utilities;
 
     using HandBrakeWPF.Model;
     using HandBrakeWPF.Utilities;
@@ -31,55 +33,19 @@ namespace HandBrakeWPF.Services.Scan.Model
             this.Titles = new List<Title>();
         }
 
-        /// <summary>
-        /// Gets or sets ScanPath.
-        /// The Path used by the Scan Service.
-        /// </summary>
-        public string ScanPath { get; set; }
+        public Source(Source scannedSource) : this(scannedSource.Titles)
+        { 
+        }
+
+        public Source(List<Title> titles)
+        {
+            this.Titles = titles;
+        }
 
         /// <summary>
         /// Gets or sets Titles. A list of titles from the source
         /// </summary>
         [XmlIgnore]
-        public List<Title> Titles { get; set; }
-
-        public string SourceName { get; private set; }
-
-        /// <summary>
-        /// Copy this Source to another Source Model
-        /// </summary>
-        /// <param name="source">
-        /// The source.
-        /// </param>
-        public void CopyTo(Source source)
-        {
-            source.Titles = this.Titles;
-            source.ScanPath = this.ScanPath;
-
-            // Scan Path is a File.
-            if (File.Exists(this.ScanPath))
-            {
-                this.SourceName = Path.GetFileNameWithoutExtension(this.ScanPath);
-            }
-
-            // Scan Path is a folder.
-            if (Directory.Exists(this.ScanPath))
-            {
-                // Check to see if it's a Drive. If yes, use the volume label.
-                foreach (DriveInformation item in DriveUtilities.GetDrives())
-                {
-                    if (item.RootDirectory.Contains(this.ScanPath.Replace("\\\\", "\\")))
-                    {
-                        this.SourceName = item.VolumeLabel;
-                    }
-                }
-
-                // Otherwise, it may be a path of files.
-                if (string.IsNullOrEmpty(this.SourceName))
-                {
-                    this.SourceName = Path.GetFileName(this.ScanPath);
-                }
-            }
-        }
+        public List<Title> Titles { get; }
     }
 }

@@ -1,6 +1,6 @@
 /* hb.c
 
-   Copyright (c) 2003-2021 HandBrake Team
+   Copyright (c) 2003-2024 HandBrake Team
    This file is part of the HandBrake source code
    Homepage: <http://handbrake.fr/>.
    It may be used under the terms of the GNU General Public License v2.
@@ -9,6 +9,7 @@
 
 #include "handbrake/handbrake.h"
 #include "handbrake/hbffmpeg.h"
+#include "handbrake/hbavfilter.h"
 #include "handbrake/encx264.h"
 #include "libavfilter/avfilter.h"
 #include <stdio.h>
@@ -75,11 +76,7 @@ int disable_hardware = 0;
 
 static void thread_func( void * );
 
-void hb_avcodec_init()
-{
-}
-
-int hb_avcodec_open(AVCodecContext *avctx, AVCodec *codec,
+int hb_avcodec_open(AVCodecContext *avctx, const AVCodec *codec,
                     AVDictionary **av_opts, int thread_count)
 {
     int ret;
@@ -90,7 +87,6 @@ int hb_avcodec_open(AVCodecContext *avctx, AVCodec *codec,
         avctx->thread_count = (thread_count == HB_FFMPEG_THREADS_AUTO) ?
                                hb_get_cpu_count() / 2 + 1 : thread_count;
         avctx->thread_type = FF_THREAD_FRAME|FF_THREAD_SLICE;
-        avctx->thread_safe_callbacks = 1;
     }
     else
     {
@@ -117,13 +113,18 @@ int hb_picture_fill(uint8_t *data[], int stride[], hb_buffer_t *buf)
 {
     int ret, ii;
 
+    if (buf->f.max_plane < 0)
+    {
+        return -1;
+    }
+
     for (ii = 0; ii <= buf->f.max_plane; ii++)
         stride[ii] = buf->plane[ii].stride;
     for (; ii < 4; ii++)
         stride[ii] = stride[ii - 1];
 
     ret = av_image_fill_pointers(data, buf->f.fmt,
-                                 buf->plane[0].height_stride,
+                                 buf->plane[0].height,
                                  buf->data, stride);
     if (ret != buf->size)
     {
@@ -310,7 +311,7 @@ int hb_get_build( hb_handle_t * h )
 void hb_remove_previews( hb_handle_t * h )
 {
     char          * filename;
-    char          * dirname;
+    const char    * dirname;
     hb_title_t    * title;
     int             i, count, len;
     DIR           * dir;
@@ -320,7 +321,6 @@ void hb_remove_previews( hb_handle_t * h )
     dir = opendir( dirname );
     if (dir == NULL)
     {
-        free(dirname);
         return;
     }
 
@@ -350,7 +350,6 @@ void hb_remove_previews( hb_handle_t * h )
             free(filename);
         }
     }
-    free(dirname);
     closedir( dir );
 }
 
@@ -361,16 +360,33 @@ void hb_remove_previews( hb_handle_t * h )
  * @param title_index Desired title to scan.  0 for all titles.
  * @param preview_count Number of preview images to generate.
  * @param store_previews Whether or not to write previews to disk.
+ * @param min_duration Ignore titles below a given threshold
+ * @param max_duration Ignore titles longer than a given threshold
+ * @param crop_threshold_frames The number of frames to trigger smart crop
+ * @param crop_threshold_pixels The variance in pixels detected that are allowed for.
+ * @param exclude_extensions A list of extensions to exclude for this scan.
+ * @param hw_decode  The preferred hardware decoder to use..
+ * @param keep_duplicate_titles
  */
-void hb_scan( hb_handle_t * h, const char * path, int title_index,
-              int preview_count, int store_previews, uint64_t min_duration )
+void hb_scan( hb_handle_t * h, hb_list_t * paths, int title_index,
+              int preview_count, int store_previews, uint64_t min_duration, uint64_t max_duration,
+              int crop_threshold_frames, int crop_threshold_pixels,
+              hb_list_t * exclude_extensions, int hw_decode, int keep_duplicate_titles)
 {
     hb_title_t * title;
 
-    // Check if scanning is necessary.
-    if (h->title_set.path != NULL && !strcmp(h->title_set.path, path))
+    char *single_path = NULL;
+    int path_count = hb_list_count(paths);
+
+    if (path_count == 1)
     {
-        // Current title_set path matches requested path.
+        single_path = hb_list_item(paths, 0);
+    }
+    
+    // Check if scanning is necessary. Only works on Single Path.
+    if (single_path != NULL && h->title_set.path != NULL && !strcmp(h->title_set.path, single_path))
+    {
+        // Current title_set path matches requested single_path.
         // Check if the requested title has already been scanned.
         int ii;
         for (ii = 0; ii < hb_list_count(h->title_set.list_title); ii++)
@@ -432,10 +448,18 @@ void hb_scan( hb_handle_t * h, const char * path, int title_index,
     }
 #endif
 
-    hb_log( "hb_scan: path=%s, title_index=%d", path, title_index );
-    h->scan_thread = hb_scan_init( h, &h->scan_die, path, title_index,
+    char *path_info = single_path;
+    if (path_count > 1)
+    {
+        path_info = "(multiple)";
+    }
+
+    hb_log( "hb_scan: path=%s, title_index=%d", path_info, title_index );
+    h->scan_thread = hb_scan_init( h, &h->scan_die, paths, title_index,
                                    &h->title_set, preview_count,
-                                   store_previews, min_duration );
+                                   store_previews, min_duration, max_duration,
+                                   crop_threshold_frames, crop_threshold_pixels,
+                                   exclude_extensions, hw_decode, keep_duplicate_titles);
 }
 
 void hb_force_rescan( hb_handle_t * h )
@@ -594,9 +618,15 @@ hb_buffer_t * hb_read_preview(hb_handle_t * h, hb_title_t *title, int preview, i
     hb_buffer_t * buf;
     buf = hb_frame_buffer_init(AV_PIX_FMT_YUV420P,
                                title->geometry.width, title->geometry.height);
+    buf->f.color_prim      = title->color_prim;
+    buf->f.color_transfer  = title->color_transfer;
+    buf->f.color_matrix    = title->color_matrix;
+    buf->f.color_range     = AVCOL_RANGE_MPEG;
+    buf->f.chroma_location = title->chroma_location;
 
     if (!buf)
     {
+        hb_error("hb_read_preview: hb_frame_buffer_init failed");
         goto done;
     }
 
@@ -717,109 +747,298 @@ done:
     return buf;
 }
 
-hb_image_t* hb_get_preview2(hb_handle_t * h, int title_idx, int picture,
-                            hb_geometry_settings_t *geo, int deinterlace)
+static void process_filter(hb_filter_object_t * filter)
 {
-    char                 filename[1024];
-    hb_buffer_t        * in_buf = NULL, * deint_buf = NULL;
-    hb_buffer_t        * preview_buf = NULL;
-    uint32_t             swsflags;
-    uint8_t            * preview_data[4], * crop_data[4];
-    int                  preview_stride[4], crop_stride[4];
-    struct SwsContext  * context;
+    hb_buffer_t * in, * out;
 
-    int width = geo->geometry.width *
-                geo->geometry.par.num / geo->geometry.par.den;
-    int height = geo->geometry.height;
+    while (filter->status != HB_FILTER_DONE)
+    {
+        in = hb_fifo_get_wait(filter->fifo_in);
+        if (in == NULL)
+            continue;
 
-    // Set min/max dimensions to prevent failure to initialize
-    // sws context and absurd sizes.
+        out = NULL;
+        filter->status = filter->work(filter, &in, &out);
+        if (in != NULL)
+        {
+            hb_buffer_close(&in);
+        }
+        if (out != NULL)
+        {
+            hb_fifo_push(filter->fifo_out, out);
+        }
+    }
+}
+
+// Get preview and apply applicable filters
+hb_image_t * hb_get_preview(hb_handle_t * h, hb_dict_t * job_dict,
+                             int picture, int rescale, int pix_fmt)
+{
+    hb_job_t    * job;
+    hb_title_t  * title = NULL;
+    hb_buffer_t * in = NULL, * out;
+
+    job = hb_dict_to_job(h, job_dict);
+    if (job == NULL)
+    {
+        hb_error("hb_get_preview3: failed to unpack job");
+        goto fail;
+    }
+    title = job->title;
+
+    in = hb_read_preview( h, title, picture, HB_PREVIEW_FORMAT_JPG );
+    if (in == NULL)
+    {
+        goto fail;
+    }
+
+    // Initialize supported filters
+    hb_list_t        * list_filter = job->list_filter;
+    hb_filter_init_t   init;
+    int                ii;
+
+    memset(&init, 0, sizeof(init));
+    init.time_base.num = 1;
+    init.time_base.den = 90000;
+    init.job = job;
+    init.pix_fmt = AV_PIX_FMT_YUV420P;
+    init.hw_pix_fmt = AV_PIX_FMT_NONE;
+    init.color_range = AVCOL_RANGE_MPEG;
+
+    init.color_prim = title->color_prim;
+    init.color_transfer = title->color_transfer;
+    init.color_matrix = title->color_matrix;
+    init.chroma_location = title->chroma_location;
+    init.geometry = title->geometry;
+    memset(init.crop, 0, sizeof(int[4]));
+    init.vrate = job->vrate;
+    init.cfr = 0;
+    init.grayscale = 0;
+
+    hb_filter_object_t * filter;
+
+    for (ii = 0; ii < hb_list_count(list_filter); )
+    {
+        filter = hb_list_item(list_filter, ii);
+        switch (filter->id)
+        {
+            case HB_FILTER_AVFILTER:
+            case HB_FILTER_CROP_SCALE:
+            case HB_FILTER_PAD:
+            case HB_FILTER_ROTATE:
+            case HB_FILTER_COLORSPACE:
+            case HB_FILTER_DECOMB:
+            case HB_FILTER_DETELECINE:
+            case HB_FILTER_YADIF:
+            case HB_FILTER_GRAYSCALE:
+                break;
+
+            case HB_FILTER_VFR:
+            case HB_FILTER_RENDER_SUB:
+            case HB_FILTER_NLMEANS:
+            case HB_FILTER_CHROMA_SMOOTH:
+            case HB_FILTER_LAPSHARP:
+            case HB_FILTER_UNSHARP:
+            case HB_FILTER_DEBLOCK:
+            case HB_FILTER_COMB_DETECT:
+            case HB_FILTER_HQDN3D:
+            case HB_FILTER_BWDIF:
+                // Not implemented, N/A, or requires multiple frame input
+                hb_list_rem(list_filter, filter);
+                hb_filter_close(&filter);
+                continue;
+            default:
+                hb_log("hb_get_preview3: Unrecognized filter (%d)",
+                       filter->id);
+                hb_list_rem(list_filter, filter);
+                hb_filter_close(&filter);
+                continue;
+        }
+        if (filter->init != NULL && filter->init(filter, &init))
+        {
+            hb_error("hb_get_preview3: Failure to initialize filter '%s'",
+                     filter->name);
+            hb_list_rem(list_filter, filter);
+            hb_filter_close(&filter);
+            continue;
+        }
+        ii++;
+    }
+
+    job->output_pix_fmt = init.pix_fmt;
+    job->color_prim = init.color_prim;
+    job->color_transfer = init.color_transfer;
+    job->color_matrix = init.color_matrix;
+    job->width = init.geometry.width;
+    job->height = init.geometry.height;
+    // job->par is supplied by the frontend.
     //
-    // This means output image size may not match requested image size!
-    int ww = width, hh = height;
-    width  = MIN(MAX(width,                HB_MIN_WIDTH),  HB_MAX_WIDTH);
-    height = MIN(MAX(height * width  / ww, HB_MIN_HEIGHT), HB_MAX_HEIGHT);
-    width  = MIN(MAX(width  * height / hh, HB_MIN_WIDTH),  HB_MAX_WIDTH);
+    // The filter chain does not know what the final desired PAR is.
+    // job->par = init.geometry.par;
+    memcpy(job->crop, init.crop, sizeof(int[4]));
+    job->vrate = init.vrate;
+    job->cfr = init.cfr;
+    job->grayscale = init.grayscale;
 
-    swsflags = SWS_LANCZOS | SWS_ACCURATE_RND;
-
-    preview_buf = hb_frame_buffer_init(AV_PIX_FMT_RGB32, width, height);
-    // fill in AVPicture
-    hb_picture_fill( preview_data, preview_stride, preview_buf );
-
-
-    memset( filename, 0, 1024 );
-
-    hb_title_t * title;
-    title = hb_find_title_by_index(h, title_idx);
-    if (title == NULL)
+    if (rescale)
     {
-        hb_error( "hb_get_preview2: invalid title (%d)", title_idx );
+        // Add "cropscale"
+        // Adjusts for pixel aspect, performs any requested post-scaling
+        //
+        // This will scale the result at the end of the pipeline.
+        // I.e. padding will be scaled
+        hb_rational_t par = job->par;
+
+        int scaled_width  = init.geometry.width;
+        int scaled_height = init.geometry.height;
+
+        filter = hb_filter_init(HB_FILTER_CROP_SCALE);
+        filter->settings = hb_dict_init();
+        if (par.num >= par.den)
+        {
+            scaled_width = scaled_width * par.num / par.den;
+        }
+        else
+        {
+            scaled_height = scaled_height * par.den / par.num;
+        }
+        hb_dict_set_int(filter->settings, "width", scaled_width);
+        hb_dict_set_int(filter->settings, "height", scaled_height);
+        hb_list_add(job->list_filter, filter);
+
+        if (filter->init != NULL && filter->init(filter, &init))
+        {
+            hb_error("hb_get_preview3: Failure to initialize filter '%s'",
+                     filter->name);
+            hb_list_rem(list_filter, filter);
+            hb_filter_close(&filter);
+        }
+    }
+
+    if (pix_fmt != AV_PIX_FMT_NONE)
+    {
+        filter = hb_filter_init(HB_FILTER_FORMAT);
+        filter->settings = hb_dict_init();
+        hb_dict_set_string(filter->settings, "format", av_get_pix_fmt_name(pix_fmt));
+        hb_list_add(job->list_filter, filter);
+
+        if (filter->init != NULL && filter->init(filter, &init))
+        {
+            hb_error("hb_get_preview3: Failure to initialize filter '%s'",
+                     filter->name);
+            hb_list_rem(list_filter, filter);
+            hb_filter_close(&filter);
+        }
+    }
+
+    hb_avfilter_combine(list_filter);
+
+    for( ii = 0; ii < hb_list_count( list_filter ); )
+    {
+        filter = hb_list_item( list_filter, ii );
+        filter->done = &job->done;
+        if (filter->post_init != NULL && filter->post_init(filter, job))
+        {
+            hb_log( "hb_get_preview3: Failure to initialise filter '%s'",
+                    filter->name );
+            hb_list_rem(list_filter, filter);
+            hb_filter_close(&filter);
+            continue;
+        }
+        ii++;
+    }
+
+    // Set up filter fifos
+    hb_fifo_t *fifo_in, * fifo_first, * fifo_last;
+
+    fifo_last = fifo_in = fifo_first = hb_fifo_init(2, 2);
+    for( ii = 0; ii < hb_list_count( list_filter ); ii++)
+    {
+        filter = hb_list_item(list_filter, ii);
+        if (!filter->skip)
+        {
+            filter->fifo_in = fifo_in;
+            filter->fifo_out = hb_fifo_init(2, 2);
+            fifo_last = fifo_in = filter->fifo_out;
+        }
+    }
+
+    // Feed preview frame to filter chain
+    hb_fifo_push(fifo_first, in);
+    hb_fifo_push(fifo_first, hb_buffer_eof_init());
+
+    // Process the preview frame through all filters
+    for( ii = 0; ii < hb_list_count( list_filter ); ii++)
+    {
+        filter = hb_list_item(list_filter, ii);
+        if (!filter->skip)
+        {
+            process_filter(filter);
+        }
+    }
+    // Retrieve the filtered preview frame
+    out = hb_fifo_get(fifo_last);
+
+    // Close filters
+    for (ii = 0; ii < hb_list_count(list_filter); ii++)
+    {
+        filter = hb_list_item(list_filter, ii);
+        filter->close(filter);
+    }
+
+    // Close fifos
+    hb_fifo_close(&fifo_first);
+    for( ii = 0; ii < hb_list_count( list_filter ); ii++)
+    {
+        filter = hb_list_item(list_filter, ii);
+        hb_fifo_close(&filter->fifo_out);
+    }
+
+    if (out == NULL)
+    {
+        hb_error("hb_get_preview3: Failed to filter preview");
         goto fail;
     }
 
-    in_buf = hb_read_preview( h, title, picture, HB_PREVIEW_FORMAT_JPG );
-    if ( in_buf == NULL )
+    hb_image_t *image = hb_buffer_to_image(out);
+    hb_buffer_close(&out);
+    if (image->width < 16 || image->height < 16)
     {
+        // Guard against broken filter generating degenerate images
+        hb_error("hb_get_preview3: bad preview image output by filters");
+        hb_image_close(&image);
         goto fail;
     }
-
-    if (deinterlace)
-    {
-        // Deinterlace and crop
-        deint_buf = hb_frame_buffer_init( AV_PIX_FMT_YUV420P,
-                              title->geometry.width, title->geometry.height );
-        hb_deinterlace(deint_buf, in_buf);
-        hb_picture_crop(crop_data, crop_stride, deint_buf,
-                        geo->crop[0], geo->crop[2] );
-    }
-    else
-    {
-        // Crop
-        hb_picture_crop(crop_data, crop_stride, in_buf,
-                        geo->crop[0], geo->crop[2] );
-    }
-
-    int colorspace = hb_sws_get_colorspace(title->color_matrix);
-
-    // Get scaling context
-    context = hb_sws_get_context(
-                title->geometry.width  - (geo->crop[2] + geo->crop[3]),
-                title->geometry.height - (geo->crop[0] + geo->crop[1]),
-                AV_PIX_FMT_YUV420P, width, height, AV_PIX_FMT_RGB32, swsflags, colorspace);
-
-    if (context == NULL)
-    {
-        // if by chance hb_sws_get_context fails, don't crash in sws_scale
-        goto fail;
-    }
-
-    // Scale
-    sws_scale(context,
-              (const uint8_t * const *)crop_data, crop_stride,
-              0, title->geometry.height - (geo->crop[0] + geo->crop[1]),
-              preview_data, preview_stride);
-
-    // Free context
-    sws_freeContext( context );
-
-    hb_image_t *image = hb_buffer_to_image(preview_buf);
 
     // Clean up
-    hb_buffer_close( &in_buf );
-    hb_buffer_close( &deint_buf );
-    hb_buffer_close( &preview_buf );
+    hb_job_close(&job);
 
     return image;
 
 fail:
 
-    hb_buffer_close( &in_buf );
-    hb_buffer_close( &deint_buf );
-    hb_buffer_close( &preview_buf );
+    {
+        int width = 854, height = 480;
 
-    image = hb_image_init(AV_PIX_FMT_RGB32, width, height);
+        if (title != NULL)
+        {
+            hb_geometry_t * geo = &title->geometry;
+
+            width = geo->width * geo->par.num / geo->par.den;
+            height = geo->height;
+        }
+
+        image = hb_image_init(pix_fmt, width, height);
+    }
+    hb_job_close(&job);
+
     return image;
+}
+
+hb_image_t * hb_get_preview3(hb_handle_t * h, int picture,
+                             hb_dict_t * job_dict)
+{
+    return hb_get_preview(h, job_dict, picture, 1, AV_PIX_FMT_RGB32);
 }
 
  /**
@@ -841,7 +1060,7 @@ fail:
  */
 int hb_detect_comb( hb_buffer_t * buf, int color_equal, int color_diff, int threshold, int prog_equal, int prog_diff, int prog_threshold )
 {
-    int j, k, n, off, cc_1, cc_2, cc[3];
+    int j, k, n, off, cc_1, cc_2, cc[3] = {0};
 	// int flag[3] ; // debugging flag
     uint16_t s1, s2, s3, s4;
     cc_1 = 0; cc_2 = 0;
@@ -893,13 +1112,13 @@ int hb_detect_comb( hb_buffer_t * buf, int color_equal, int color_diff, int thre
 
         // compare results
         /*  The final cc score for a plane is the percentage of combed pixels it contains.
-            Because sensitivity goes down to hundreths of a percent, multiply by 1000
+            Because sensitivity goes down to hundredths of a percent, multiply by 1000
             so it will be easy to compare against the threshold value which is an integer. */
         cc[k] = (int)( ( cc_1 + cc_2 ) * 1000.0 / ( width * height ) );
     }
 
 
-    /* HandBrake is all yuv420, so weight the average percentage of all 3 planes accordingly.*/
+    /* HandBrake previews are all yuv420, so weight the average percentage of all 3 planes accordingly. */
     int average_cc = ( 2 * cc[0] + ( cc[1] / 2 ) + ( cc[2] / 2 ) ) / 3;
 
     /* Now see if that average percentage of combed pixels surpasses the threshold percentage given by the user.*/
@@ -920,6 +1139,61 @@ int hb_detect_comb( hb_buffer_t * buf, int color_equal, int color_diff, int thre
 
 }
 
+static void hflip_crop_pad(int * dst, int * src, int hflip)
+{
+    if (hflip)
+    {
+        dst[2] = src[3];
+        dst[3] = src[2];
+    }
+}
+
+static void rotate_crop_pad(int * dst, int * src, int angle)
+{
+    if (angle == 90)
+    {
+        dst[3] = src[0];
+        dst[1] = src[3];
+        dst[2] = src[1];
+        dst[0] = src[2];
+    }
+    else if (angle == 180)
+    {
+        dst[0] = src[1];
+        dst[1] = src[0];
+        dst[2] = src[3];
+        dst[3] = src[2];
+    }
+    else if (angle == 270)
+    {
+        dst[2] = src[0];
+        dst[1] = src[2];
+        dst[3] = src[1];
+        dst[0] = src[3];
+    }
+}
+
+void hb_rotate_geometry( hb_geometry_crop_t * geo, hb_geometry_crop_t * result,
+                         int angle, int hflip)
+{
+    hb_geometry_crop_t in = *geo; // Make a copy in case geo aliases result
+    *result = in;
+
+    // re-orient result if needed
+    hflip_crop_pad(result->crop, in.crop, hflip);
+    hflip_crop_pad(result->pad,  in.pad,  hflip);
+    if (angle == 90 || angle == 270)
+    {
+        result->geometry.width   = in.geometry.height;
+        result->geometry.height  = in.geometry.width;
+        result->geometry.par.num = in.geometry.par.den;
+        result->geometry.par.den = in.geometry.par.num;
+    }
+    in = *result;
+    rotate_crop_pad(result->crop, in.crop, angle);
+    rotate_crop_pad(result->pad,  in.pad,  angle);
+}
+
 /**
  * Calculates destination width and height for anamorphic content
  *
@@ -927,19 +1201,27 @@ int hb_detect_comb( hb_buffer_t * buf, int color_equal, int color_diff, int thre
  * @param source_geometry - Pointer to source geometry info
  * @param geometry        - Pointer to requested destination parameters
  */
-void hb_set_anamorphic_size2(hb_geometry_t *src_geo,
-                             hb_geometry_settings_t *geo,
-                             hb_geometry_t *result)
+void hb_set_anamorphic_size2(hb_geometry_t          * src_geo,
+                             hb_geometry_settings_t * geo,
+                             hb_geometry_t          * result)
 {
-    hb_rational_t in_par, out_par;
+    hb_rational_t in_par, src_par, orig_par;
     int keep_display_aspect = !!(geo->keep & HB_KEEP_DISPLAY_ASPECT);
+    int keep_display_width  = !!(geo->keep & HB_KEEP_DISPLAY_WIDTH);
     int keep_height         = !!(geo->keep & HB_KEEP_HEIGHT);
+    int keep_width          = !!(geo->keep & HB_KEEP_WIDTH);
+    int keep_pad            = !!(geo->keep & HB_KEEP_PAD);
+    int upscale             = !!(geo->flags & HB_GEO_SCALE_UP);
+    int best                = !!(geo->flags & HB_GEO_SCALE_BEST);
 
     /* Set up some variables to make the math easier to follow. */
-    int cropped_width = src_geo->width - geo->crop[2] - geo->crop[3];
-    int cropped_height = src_geo->height - geo->crop[0] - geo->crop[1];
-    double storage_aspect = (double)cropped_width / cropped_height;
-    int mod = (geo->modulus > 0) ? EVEN(geo->modulus) : 2;
+    int    cropped_width  = src_geo->width  - geo->crop[2] - geo->crop[3];
+    int    cropped_height = src_geo->height - geo->crop[0] - geo->crop[1];
+    double cropped_sar    = (double)cropped_width / cropped_height;
+    int    mod            = (geo->modulus > 0) ? EVEN(geo->modulus) : 2;
+    int    pad_width      = geo->pad[2] + geo->pad[3];
+    int    pad_height     = geo->pad[0] + geo->pad[1];
+    double displayWidth, displayHeight;
 
     // Sanitize PAR
     if (geo->geometry.par.num == 0 || geo->geometry.par.den == 0)
@@ -951,13 +1233,18 @@ void hb_set_anamorphic_size2(hb_geometry_t *src_geo,
         src_geo->par.num = src_geo->par.den = 1;
     }
 
-    // Use 64 bits to avoid overflow till the final hb_reduce() call
-    hb_reduce(&in_par.num, &in_par.den,
-              geo->geometry.par.num, geo->geometry.par.den);
-    int64_t dst_par_num = in_par.num;
-    int64_t dst_par_den = in_par.den;
+    in_par  = geo->geometry.par;
+    src_par = src_geo->par;
 
-    hb_rational_t src_par = src_geo->par;
+    if (!keep_width && !keep_display_width)
+    {
+        orig_par.num = geo->displayWidth;
+        orig_par.den = geo->geometry.width + pad_width;
+    }
+    else
+    {
+        orig_par = in_par;
+    }
 
     /* If a source was really NTSC or PAL and the user specified ITU PAR
        values, replace the standard PAR values with the ITU broadcast ones. */
@@ -976,14 +1263,14 @@ void hb_set_anamorphic_size2(hb_geometry_t *src_geo,
             if (iaspect == 16)
             {
                 /* It's widescreen */
-                dst_par_num = 40;
-                dst_par_den = 33;
+                in_par.num = 40;
+                in_par.den = 33;
             }
             else if (iaspect == 12)
             {
                 /* It's 4:3 */
-                dst_par_num = 10;
-                dst_par_den = 11;
+                in_par.num = 10;
+                in_par.den = 11;
             }
         }
         else if (src_geo->height == 576)
@@ -992,24 +1279,30 @@ void hb_set_anamorphic_size2(hb_geometry_t *src_geo,
             if (iaspect == 16)
             {
                 /* It's widescreen */
-                dst_par_num = 16;
-                dst_par_den = 11;
+                in_par.num = 16;
+                in_par.den = 11;
             }
             else if (iaspect == 12)
             {
                 /* It's 4:3 */
-                dst_par_num = 12;
-                dst_par_den = 11;
+                in_par.num = 12;
+                in_par.den = 11;
             }
         }
     }
 
-    /*
-       3 different ways of deciding output dimensions:
-        - 1: Strict anamorphic, preserve source dimensions
-        - 2: Loose anamorphic, round to mod16 and preserve storage aspect ratio
-        - 3: Power user anamorphic, specify everything
-    */
+
+    // Remove pad from DAR, simplifies latter calculations
+    displayWidth = geo->displayWidth -
+                   (double)pad_width * orig_par.den / orig_par.num;
+    displayHeight = geo->displayHeight - pad_height;
+    if (!keep_pad)
+    {
+
+        pad_width  = 0;
+        pad_height = 0;
+    }
+
     int width, height;
     int maxWidth, maxHeight;
 
@@ -1031,48 +1324,168 @@ void hb_set_anamorphic_size2(hb_geometry_t *src_geo,
     {
         maxHeight = HB_MAX_HEIGHT;
     }
+    if (!upscale)
+    {
+        // Limit resolution to source resolution + pad
+        if (maxWidth > cropped_width + pad_width)
+        {
+            maxWidth = MULTIPLE_MOD_DOWN(cropped_width + pad_width, mod);
+        }
+        if (maxHeight > cropped_height + pad_height)
+        {
+            maxHeight = MULTIPLE_MOD_DOWN(cropped_height + pad_height, mod);
+        }
+    }
+
+    width  = geo->geometry.width;
+    height = geo->geometry.height;
+
+    if (best && !keep_display_width)
+    {
+        // Select "best" resolution based on upscale settings and
+        // source resolution.
+        width  = cropped_width;
+        height = cropped_height;
+        if (upscale && maxWidth > 0)
+        {
+            width = maxWidth - pad_width;
+        }
+        if (upscale && maxHeight > 0)
+        {
+            height = maxHeight - pad_height;
+        }
+    }
+    switch (geo->mode)
+    {
+        case HB_ANAMORPHIC_STRICT:
+            /* "Strict" anamorphic: MOD 2, source PAR, and source dimensions */
+            mod    = 2;
+            in_par = src_par;
+            width  = cropped_width;
+            height = cropped_height;
+            break;
+
+        case HB_ANAMORPHIC_LOOSE:
+            in_par = src_par;
+            break;
+
+        case HB_ANAMORPHIC_NONE:
+            /* "None" anamorphic, a.k.a. 1:1.  */
+            in_par.num = 1;
+            in_par.den = 1;
+            break;
+
+        case HB_ANAMORPHIC_CUSTOM:
+            /* "Custom" anamorphic: Set a specific PAR */
+        default:
+            break;
+    }
+
+    // Use 64 bits to avoid overflow till the final hb_reduce() call
+    int64_t dst_par_num;
+    int64_t dst_par_den;
+
+    hb_reduce64(&dst_par_num, &dst_par_den, in_par.num, in_par.den);
 
     switch (geo->mode)
     {
+        case HB_ANAMORPHIC_STRICT:
+        case HB_ANAMORPHIC_LOOSE:
         case HB_ANAMORPHIC_NONE:
+        case HB_ANAMORPHIC_CUSTOM:
         {
-            /* "None" anamorphic, a.k.a. 1:1.
-             */
-            double par, cropped_sar, dar;
-            par = (double)src_geo->par.num / src_geo->par.den;
-            cropped_sar = (double)cropped_width / cropped_height;
-            dar = par * cropped_sar;
+            double dar;
 
-            /* "None" anamorphic. a.k.a. non-anamorphic
-             *  - Uses mod-compliant dimensions, set by user
-             *  - Allows users to set the either width *or* height
-             */
             if (keep_display_aspect)
             {
+                // Recompute width or height to maintain the source DAR
+                double par;
+
+                par = (double)src_par.num / src_par.den;
+                dar = par * cropped_sar;
+
                 if (!keep_height)
                 {
-                    width = MULTIPLE_MOD_UP(geo->geometry.width, mod);
-                    height = MULTIPLE_MOD(width / dar, mod);
+                    width = MULTIPLE_MOD_UP(width, mod);
+                    height = MULTIPLE_MOD(
+                        width * dst_par_num / dst_par_den / dar, mod);
                 }
                 else
                 {
-                    height = MULTIPLE_MOD_UP(geo->geometry.height, mod);
-                    width = MULTIPLE_MOD(height * dar, mod);
+                    height = MULTIPLE_MOD_UP(height, mod);
+                    width  = MULTIPLE_MOD_UP(
+                        dar * height * dst_par_den / dst_par_num, mod);
                 }
+            }
+            else if (keep_display_width)
+            {
+                // Recompute width if we are modifying display size
+                // in these anamorphic modes. These modes all have a fixed
+                // user specified PAR.
+                //
+                // It is assumed displayHeight == height in this scenario.
+                double dwidth;
+                dar = (double)displayWidth / displayHeight;
+
+                // We need to determine if we should round up or down.
+                // If a wider display aspect is requested, then the computed
+                // 'double' storage aspect will be larger than the current
+                // storage aspect, else it will be smaller.
+                dwidth = displayWidth * dst_par_den / dst_par_num;
+                if (dwidth > geo->geometry.width)
+                {
+                    width = MULTIPLE_MOD_UP((int)dwidth, mod);
+                }
+                else
+                {
+                    width = MULTIPLE_MOD_DOWN((int)dwidth, mod);
+                }
+                height = MULTIPLE_MOD_UP(height, mod);
             }
             else
             {
-                width = MULTIPLE_MOD_UP(geo->geometry.width, mod);
-                height = MULTIPLE_MOD_UP(geo->geometry.height, mod);
+                // Recompute width or height to maintain the current DAR
+                dar = (double)displayWidth / displayHeight;
+                if (!keep_height)
+                {
+                    width = MULTIPLE_MOD_UP(width, mod);
+                    height = MULTIPLE_MOD(
+                        width * dst_par_num / dst_par_den / dar, mod);
+                }
+                else
+                {
+                    height = MULTIPLE_MOD_UP(height, mod);
+                    width  = MULTIPLE_MOD(
+                        dar * height * dst_par_den / dst_par_num, mod);
+                }
             }
 
             // Limit to min/max dimensions
+            if (width + pad_width > maxWidth)
+            {
+                width  = maxWidth - pad_width;
+                if (keep_display_aspect)
+                {
+                    height = MULTIPLE_MOD(
+                        width * dst_par_num / dst_par_den / dar, mod);
+                }
+            }
+            if (height + pad_height > maxHeight)
+            {
+                height  = maxHeight - pad_height;
+                if (keep_display_aspect)
+                {
+                    width  = MULTIPLE_MOD_UP(
+                        dar * height * dst_par_den / dst_par_num, mod);
+                }
+            }
             if (width < HB_MIN_WIDTH)
             {
                 width  = HB_MIN_WIDTH;
                 if (keep_display_aspect)
                 {
-                    height = MULTIPLE_MOD(width / dar, mod);
+                    height = MULTIPLE_MOD(
+                        width * dst_par_num / dst_par_den / dar, mod);
                 }
             }
             if (height < HB_MIN_HEIGHT)
@@ -1080,135 +1493,21 @@ void hb_set_anamorphic_size2(hb_geometry_t *src_geo,
                 height  = HB_MIN_HEIGHT;
                 if (keep_display_aspect)
                 {
-                    width = MULTIPLE_MOD(height * dar, mod);
+                    width  = MULTIPLE_MOD_UP(
+                        dar * height * dst_par_den / dst_par_num, mod);
                 }
             }
-            if (width > maxWidth)
-            {
-                width  = maxWidth;
-                if (keep_display_aspect)
-                {
-                    height = MULTIPLE_MOD(width / dar, mod);
-                }
-            }
-            if (height > maxHeight)
-            {
-                height  = maxHeight;
-                if (keep_display_aspect)
-                {
-                    width = MULTIPLE_MOD(height * dar, mod);
-                }
-            }
-            dst_par_num = dst_par_den = 1;
-        } break;
 
-        case HB_ANAMORPHIC_STRICT:
-        {
-            /* "Strict" anamorphic.
-             *  - Uses mod2-compliant dimensions,
-             *  - Forces title - crop dimensions
-             */
-            width  = MULTIPLE_MOD_UP(cropped_width, 2);
-            height = MULTIPLE_MOD_UP(cropped_height, 2);
-
-            /* Adjust the output PAR for new width/height
-             * Film AR is the source display width / cropped source height.
-             * Output display width is the output height * film AR.
-             * Output PAR is the output display width / output storage width.
-             *
-             * i.e.
-             * source_display_width = cropped_width * source PAR
-             * AR = source_display_width / cropped_height;
-             * output_display_width = height * AR;
-             * par = output_display_width / width;
-             *
-             * When these terms are reduced, you get the following...
-             */
-            dst_par_num = (int64_t)height * cropped_width  * src_par.num;
-            dst_par_den = (int64_t)width  * cropped_height * src_par.den;
-        } break;
-
-        case HB_ANAMORPHIC_LOOSE:
-        {
-            /* "Loose" anamorphic.
-             *  - Uses mod-compliant dimensions, set by user
-             *  - Allows users to set the either width *or* height
-             */
-            if (!keep_height)
+            if (geo->mode != HB_ANAMORPHIC_CUSTOM &&
+                geo->mode != HB_ANAMORPHIC_NONE && keep_display_aspect)
             {
-                width = MULTIPLE_MOD_UP(geo->geometry.width, mod);
-                height = MULTIPLE_MOD_UP(width / storage_aspect + 0.5, mod);
-            }
-            else
-            {
-                height = MULTIPLE_MOD_UP(geo->geometry.height, mod);
-                width = MULTIPLE_MOD_UP(height * storage_aspect + 0.5, mod);
-            }
-
-            // Limit to min/max dimensions
-            if (width < HB_MIN_WIDTH)
-            {
-                width  = HB_MIN_WIDTH;
-                height = MULTIPLE_MOD(width / storage_aspect + 0.5, mod);
-            }
-            if (height < HB_MIN_HEIGHT)
-            {
-                height  = HB_MIN_HEIGHT;
-                width = MULTIPLE_MOD(height * storage_aspect + 0.5, mod);
-            }
-            if (width > maxWidth)
-            {
-                width = maxWidth;
-                height = MULTIPLE_MOD(width / storage_aspect + 0.5, mod);
-            }
-            if (height > maxHeight)
-            {
-                height = maxHeight;
-                width = MULTIPLE_MOD(height * storage_aspect + 0.5, mod);
-            }
-
-            /* Adjust the output PAR for new width/height
-               See comment in HB_ANAMORPHIC_STRICT */
-            dst_par_num = (int64_t)height * cropped_width  * src_par.num;
-            dst_par_den = (int64_t)width  * cropped_height * src_par.den;
-        } break;
-
-        case HB_ANAMORPHIC_CUSTOM:
-        {
-            /* "Custom" anamorphic: Power User Jamboree
-               - Set everything based on specified values */
-
-            /* Time to get picture dimensions that divide cleanly.*/
-            width  = MULTIPLE_MOD_UP(geo->geometry.width, mod);
-            height = MULTIPLE_MOD_UP(geo->geometry.height, mod);
-
-            // Limit to min/max dimensions
-            if (width < HB_MIN_WIDTH)
-            {
-                width  = HB_MIN_WIDTH;
-            }
-            if (height < HB_MIN_HEIGHT)
-            {
-                height  = HB_MIN_HEIGHT;
-            }
-            if (width > maxWidth)
-            {
-                width = maxWidth;
-            }
-            if (height > maxHeight)
-            {
-                height = maxHeight;
-            }
-            if (keep_display_aspect)
-            {
-                /* We can ignore the possibility of a PAR change
-                 * Adjust the output PAR for new width/height
-                 * See comment in HB_ANAMORPHIC_STRICT
-                 */
-                dst_par_num = (int64_t)height * cropped_width  *
-                                       src_par.num;
-                dst_par_den = (int64_t)width  * cropped_height *
-                                       src_par.den;
+                // Rounding errors in width/height calculations may
+                // throw off final display aspect.
+                //
+                // Recompute PAR to fix display aspect, unless user set
+                // a specific PAR.
+                dst_par_num = (int64_t)height * cropped_width  * src_par.num;
+                dst_par_den = (int64_t)width  * cropped_height * src_par.den;
             }
         } break;
 
@@ -1221,14 +1520,36 @@ void hb_set_anamorphic_size2(hb_geometry_t *src_geo,
              *  - Does *not* maintain original source PAR if one
              *    or both dimensions is limited by maxWidth/maxHeight.
              */
-            /* Anamorphic 3: Power User Jamboree
-               - Set everything based on specified values */
+
+            if (!keep_display_aspect && keep_display_width)
+            {
+                // Recompute PAR if we are modifying display size
+                // in auto anamorphic mode (stretching the display aspect).
+                //
+                // Not that (keep_display_aspect && geo->displayWidth < 0)
+                // is not handled.  It is not a valid use case in the
+                // frontends, so it is unnecessary to complicate this further
+                // with support for it.
+                width  = geo->geometry.width;
+                height = geo->geometry.height;
+                dst_par_num = displayWidth;
+                dst_par_den = width;
+                break;
+            }
 
             /* Time to get picture dimensions that divide cleanly.*/
-            width  = MULTIPLE_MOD_UP(geo->geometry.width, mod);
-            height = MULTIPLE_MOD_UP(geo->geometry.height, mod);
+            width  = MULTIPLE_MOD_UP(width, mod);
+            height = MULTIPLE_MOD_UP(height, mod);
 
             // Limit to min/max dimensions
+            if (width + pad_width > maxWidth)
+            {
+                width = maxWidth - pad_width;
+            }
+            if (height + pad_height > maxHeight)
+            {
+                height = maxHeight - pad_height;
+            }
             if (width < HB_MIN_WIDTH)
             {
                 width  = HB_MIN_WIDTH;
@@ -1237,70 +1558,41 @@ void hb_set_anamorphic_size2(hb_geometry_t *src_geo,
             {
                 height  = HB_MIN_HEIGHT;
             }
-            if (width > maxWidth)
+
+            /* Adjust the output PAR for new width/height */
+            if (keep_display_aspect)
             {
-                width = maxWidth;
+                dst_par_num = (int64_t)height * cropped_width  * src_par.num;
+                dst_par_den = (int64_t)width  * cropped_height * src_par.den;
             }
-            if (height > maxHeight)
+            else
             {
-                height = maxHeight;
+                dst_par_num = displayWidth;
+                dst_par_den = width;
             }
-            /* Adjust the output PAR for new width/height
-             * See comment in HB_ANAMORPHIC_STRICT
-             */
-            dst_par_num = (int64_t)height * cropped_width  * src_par.num;
-            dst_par_den = (int64_t)width  * cropped_height * src_par.den;
         } break;
-    }
-    if (width < HB_MIN_WIDTH || height < HB_MIN_HEIGHT ||
-        width > maxWidth     || height > maxHeight)
-    {
-        // Limits set above may have also attempted to keep PAR and DAR.
-        // If we are still outside limits, enforce them and modify
-        // PAR to keep DAR
-        if (width < HB_MIN_WIDTH)
-        {
-            width  = HB_MIN_WIDTH;
-        }
-        if (height < HB_MIN_HEIGHT)
-        {
-            height  = HB_MIN_HEIGHT;
-        }
-        if (width > maxWidth)
-        {
-            width = maxWidth;
-        }
-        if (height > maxHeight)
-        {
-            height = maxHeight;
-        }
-        if (keep_display_aspect && geo->mode != HB_ANAMORPHIC_NONE)
-        {
-            dst_par_num = (int64_t)height * cropped_width  * src_par.num;
-            dst_par_den = (int64_t)width  * cropped_height * src_par.den;
-        }
     }
 
     /* Pass the results back to the caller */
-    result->width = width;
+    result->width  = width;
     result->height = height;
 
-    /* While x264 is smart enough to reduce fractions on its own, libavcodec
-     * needs some help with the math, so lose superfluous factors. */
-    hb_limit_rational64(&dst_par_num, &dst_par_den,
-                        dst_par_num, dst_par_den, 65535);
-
-    // If the user is directing updating PAR, don't override his values.
+    // If the user is directly updating PAR, don't override PAR values.
     // I.e. don't even reduce the values.
-    hb_reduce(&out_par.num, &out_par.den, dst_par_num, dst_par_den);
-    if (geo->mode == HB_ANAMORPHIC_CUSTOM && !keep_display_aspect &&
-        out_par.num == in_par.num && out_par.den == in_par.den)
+    if (geo->mode == HB_ANAMORPHIC_CUSTOM ||
+        geo->mode == HB_ANAMORPHIC_NONE)
     {
-        result->par.num = geo->geometry.par.num;
-        result->par.den = geo->geometry.par.den;
+        // In these 2 anamorphic modes, the result PAR should be exactly
+        // what the user set PAR to.
+        result->par = in_par;
     }
     else
     {
+        /* While x264 is smart enough to reduce fractions on its own, libavcodec
+         * needs some help with the math, so lose superfluous factors. */
+        hb_limit_rational64(&dst_par_num, &dst_par_den,
+                            dst_par_num, dst_par_den, 65535);
+
         hb_reduce(&result->par.num, &result->par.den, dst_par_num, dst_par_den);
     }
 }
@@ -1339,8 +1631,8 @@ void hb_add_filter2( hb_value_array_t * list, hb_dict_t * filter_dict )
             }
             else if ( id == new_id )
             {
-                // Don't allow the same filter to be added twice
-                hb_value_free(&filter_dict);
+                // Updating this filter with new settings
+                hb_value_array_set(list, ii, filter_dict);
                 return;
             }
         }
@@ -1358,6 +1650,11 @@ void hb_add_filter2( hb_value_array_t * list, hb_dict_t * filter_dict )
 void hb_add_filter_dict( hb_job_t * job, hb_filter_object_t * filter,
                          const hb_dict_t * settings_in )
 {
+    if (filter == NULL)
+    {
+        hb_log("hb_add_filter_dict: filter is null");
+        return;
+    }
     hb_dict_t * settings;
 
     // Always set filter->settings to a valid hb_dict_t
@@ -1407,6 +1704,11 @@ void hb_add_filter_dict( hb_job_t * job, hb_filter_object_t * filter,
 void hb_add_filter( hb_job_t * job, hb_filter_object_t * filter,
                     const char * settings_in )
 {
+    if (filter == NULL)
+    {
+        hb_log("hb_add_filter: filter is null");
+        return;
+    }
     hb_dict_t * settings = hb_parse_filter_settings(settings_in);
     if (settings_in != NULL && settings == NULL)
     {
@@ -1611,9 +1913,9 @@ int hb_add( hb_handle_t * h, hb_job_t * job )
 
 void hb_job_setup_passes(hb_handle_t * h, hb_job_t * job, hb_list_t * list_pass)
 {
-    if (job->vquality > HB_INVALID_VIDEO_QUALITY)
+    if (job->vquality > HB_INVALID_VIDEO_QUALITY && ! hb_video_multipass_is_supported(job->vcodec, 1))
     {
-        job->twopass = 0;
+        job->multipass = 0;
     }
     if (job->indepth_scan)
     {
@@ -1622,12 +1924,16 @@ void hb_job_setup_passes(hb_handle_t * h, hb_job_t * job, hb_list_t * list_pass)
         hb_add_internal(h, job, list_pass);
         job->indepth_scan = 0;
     }
-    if (job->twopass)
+    if (job->multipass)
     {
-        hb_deep_log(2, "Adding two-pass encode");
-        job->pass_id = HB_PASS_ENCODE_1ST;
-        hb_add_internal(h, job, list_pass);
-        job->pass_id = HB_PASS_ENCODE_2ND;
+        hb_deep_log(2, "Adding multi-pass encode");
+        int analysis_pass_count = hb_video_encoder_get_count_of_analysis_passes(job->vcodec);
+        for (int i = 0; i < analysis_pass_count; i++)
+        {
+            job->pass_id = HB_PASS_ENCODE_ANALYSIS;
+            hb_add_internal(h, job, list_pass);
+        }
+        job->pass_id = HB_PASS_ENCODE_FINAL;
         hb_add_internal(h, job, list_pass);
     }
     else
@@ -1771,7 +2077,7 @@ void hb_get_state2( hb_handle_t * h, hb_state_t * s )
 }
 
 /**
- * Closes access to libhb by freeing the hb_handle_t handle ontained in hb_init.
+ * Closes access to libhb by freeing the hb_handle_t handle contained in hb_init.
  * @param _h Pointer to handle to hb_handle_t.
  */
 void hb_close( hb_handle_t ** _h )
@@ -1827,22 +2133,6 @@ int hb_global_init()
         return -1;
     }
 
-#if HB_PROJECT_FEATURE_QSV
-    if (!disable_hardware)
-    {
-        result = hb_qsv_info_init();
-        if (result < 0)
-        {
-            hb_error("hb_qsv_info_init failed!");
-            return -1;
-        }
-        hb_param_configure_qsv();
-    }
-#endif
-
-    /* libavcodec */
-    hb_avcodec_init();
-
     /* HB work objects */
     hb_register(&hb_muxer);
     hb_register(&hb_reader);
@@ -1859,6 +2149,7 @@ int hb_global_init()
     hb_register(&hb_encavcodec);
     hb_register(&hb_encavcodeca);
 #ifdef __APPLE__
+    hb_register(&hb_encvt);
     hb_register(&hb_encca_aac);
     hb_register(&hb_encca_haac);
 #endif
@@ -1868,6 +2159,7 @@ int hb_global_init()
 #if HB_PROJECT_FEATURE_X265
     hb_register(&hb_encx265);
 #endif
+    hb_register(&hb_encsvtav1);
 #if HB_PROJECT_FEATURE_QSV
     if (!disable_hardware)
     {
@@ -1894,7 +2186,7 @@ int hb_global_init()
  */
 void hb_global_close()
 {
-    char          * dirname;
+    const char    * dirname;
     DIR           * dir;
     struct dirent * entry;
 
@@ -1920,7 +2212,6 @@ void hb_global_close()
         closedir( dir );
         rmdir( dirname );
     }
-    free(dirname);
 }
 
 /**
@@ -1932,7 +2223,7 @@ void hb_global_close()
 static void thread_func( void * _h )
 {
     hb_handle_t * h = (hb_handle_t *) _h;
-    char * dirname;
+    const char * dirname;
 
     h->pid = getpid();
 
@@ -1940,7 +2231,6 @@ static void thread_func( void * _h )
     dirname = hb_get_temporary_directory();
 
     hb_mkdir( dirname );
-    free(dirname);
 
     while( !h->die )
     {
@@ -2019,11 +2309,15 @@ static void redirect_thread_func(void * _data)
     if (pipe(pfd))
        return;
 #if defined( SYS_MINGW )
-    // dup2 doesn't work on windows for some stupid reason
-    stderr->_file = pfd[1];
+    // Non-console windows apps do not have a stderr->_file
+    // assigned properly
+    (void) freopen("NUL", "w", stderr);
+    _dup2(pfd[1], _fileno(stderr));
 #else
-    dup2(pfd[1], /*stderr*/ 2);
+    dup2(pfd[1], STDERR_FILENO);
 #endif
+    setvbuf(stderr, NULL, _IONBF, 0);
+
     FILE * log_f = fdopen(pfd[0], "rb");
 
     char line_buffer[500];
@@ -2094,6 +2388,7 @@ hb_interjob_t * hb_interjob_get( hb_handle_t * h )
     return h->interjob;
 }
 
-int is_hardware_disabled(void){
+int is_hardware_disabled(void)
+{
     return disable_hardware;
 }

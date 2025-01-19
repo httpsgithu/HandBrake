@@ -9,48 +9,42 @@
 
 namespace HandBrakeWPF.Model.Audio
 {
+    using System.Collections.Generic;
     using System.ComponentModel;
     using System.Linq;
 
-    using Caliburn.Micro;
+    using HandBrake.Interop.Interop;
+    using HandBrake.Interop.Interop.Interfaces.Model;
+    using HandBrake.Interop.Interop.Interfaces.Model.Encoders;
 
-    /// <summary>
-    /// Audio Behaviours
-    /// </summary>
+    using HandBrakeWPF.ViewModels;
+
     public class AudioBehaviours : PropertyChangedBase
     {
         private AudioBehaviourModes selectedBehaviour;
-        private BindingList<string> selectedLangauges;
+        private BindingList<Language> selectedLanguages;
         private AudioTrackDefaultsMode trackDefaultBehaviour;
-
-        /// <summary>
-        /// Initializes a new instance of the <see cref="AudioBehaviours"/> class.
-        /// </summary>
+        
         public AudioBehaviours()
         {
             this.SelectedBehaviour = AudioBehaviourModes.None;
             this.SelectedTrackDefaultBehaviour = AudioTrackDefaultsMode.FirstTrack;
-            this.SelectedLangauges = new BindingList<string>();
+            this.SelectedLanguages = new BindingList<Language>();
             this.BehaviourTracks = new BindingList<AudioBehaviourTrack>();
+            this.AllowedPassthruOptions = new BindingList<HBAudioEncoder>();
+            this.AudioFallbackEncoder = HandBrakeEncoderHelpers.GetAudioEncoder(HBAudioEncoder.AvAac);
         }
 
-        /// <summary>
-        /// Initializes a new instance of the <see cref="AudioBehaviours"/> class.
-        /// </summary>
-        /// <param name="behaviours">
-        /// The behaviours.
-        /// </param>
         public AudioBehaviours(AudioBehaviours behaviours)
         {
             this.SelectedBehaviour = behaviours.SelectedBehaviour;
             this.SelectedTrackDefaultBehaviour = behaviours.SelectedTrackDefaultBehaviour;
-            this.SelectedLangauges = new BindingList<string>(behaviours.selectedLangauges.ToList());
+            this.SelectedLanguages = new BindingList<Language>(behaviours.selectedLanguages.ToList());
             this.BehaviourTracks = behaviours.BehaviourTracks;
+            this.AllowedPassthruOptions = new BindingList<HBAudioEncoder>(behaviours.AllowedPassthruOptions);
+            this.AudioFallbackEncoder = behaviours.AudioFallbackEncoder;
         }
 
-        /// <summary>
-        /// Gets or sets the selected behaviour.
-        /// </summary>
         public AudioBehaviourModes SelectedBehaviour
         {
             get
@@ -69,9 +63,6 @@ namespace HandBrakeWPF.Model.Audio
             }
         }
 
-        /// <summary>
-        /// Gets or sets the track default behaviour.
-        /// </summary>
         public AudioTrackDefaultsMode SelectedTrackDefaultBehaviour
         {
             get
@@ -89,53 +80,27 @@ namespace HandBrakeWPF.Model.Audio
             }
         }
 
-        /// <summary>
-        /// Gets or sets the selected languages.
-        /// </summary>
-        public BindingList<string> SelectedLangauges
+        public BindingList<Language> SelectedLanguages
         {
             get
             {
-                return this.selectedLangauges;
+                return this.selectedLanguages;
             }
             set
             {
-                if (Equals(value, this.selectedLangauges))
+                if (Equals(value, this.selectedLanguages))
                 {
                     return;
                 }
-                this.selectedLangauges = value;
-                this.NotifyOfPropertyChange(() => this.SelectedLangauges);
+                this.selectedLanguages = value;
+                this.NotifyOfPropertyChange(() => this.SelectedLanguages);
             }
         }
 
-        /// <summary>
-        /// The list of track templates we are going to use to generate audio tracks for a source.
-        /// </summary>
         public BindingList<AudioBehaviourTrack> BehaviourTracks { get; set; }
 
-        /// <summary>
-        /// Clone this object
-        /// </summary>
-        /// <returns>
-        /// The <see cref="object"/>.
-        /// </returns>
-        public AudioBehaviours Clone()
-        {
-            AudioBehaviours cloned = new AudioBehaviours
-            {
-                SelectedBehaviour = this.selectedBehaviour,
-                SelectedLangauges = new BindingList<string>(),
-                SelectedTrackDefaultBehaviour = this.SelectedTrackDefaultBehaviour,
-                BehaviourTracks = this.BehaviourTracks
-            };
+        public IList<HBAudioEncoder> AllowedPassthruOptions { get; set; }
 
-            foreach (var item in this.SelectedLangauges)
-            {
-                cloned.SelectedLangauges.Add(item);
-            }
-
-            return cloned;
-        }
+        public HBAudioEncoder AudioFallbackEncoder { get; set; }
     }
 }

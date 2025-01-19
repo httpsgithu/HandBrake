@@ -49,9 +49,9 @@
 
     self.title = self.core.titles.firstObject;
 
-    self.job = [[HBJob alloc] initWithTitle:self.title andPreset:self.preset];
-    self.job.outputURL = [NSURL fileURLWithPath:@"/" isDirectory:YES];
-    self.job.outputFileName = @"Dest.mp4";
+    self.job = [[HBJob alloc] initWithTitle:self.title preset:self.preset];
+    self.job.destinationFolderURL = [NSURL fileURLWithPath:@"/" isDirectory:YES];
+    self.job.destinationFileName = @"Dest.mp4";
 
     NSUndoManager *undoManager = [[NSUndoManager alloc] init];
     undoManager.groupsByEvent = NO;
@@ -65,7 +65,7 @@
         if (obj.isLeaf)
         {
             [undoManager beginUndoGrouping];
-            [self.modifiedJob applyPreset:obj];
+            [self.modifiedJob applyPreset:obj error:NULL];
             [undoManager endUndoGrouping];
         }
     }];
@@ -105,7 +105,7 @@
     XCTAssertEqualObjects(self.job.presetName, self.modifiedJob.presetName);
     XCTAssertEqual(self.job.container, self.modifiedJob.container);
 
-    XCTAssertEqual(self.job.mp4HttpOptimize, self.modifiedJob.mp4HttpOptimize);
+    XCTAssertEqual(self.job.optimize, self.modifiedJob.optimize);
     XCTAssertEqual(self.job.mp4iPodCompatible, self.modifiedJob.mp4iPodCompatible);
 
     XCTAssertEqual(self.job.angle, self.modifiedJob.angle);
@@ -135,10 +135,10 @@
     XCTAssertEqual(self.job.picture.height, self.modifiedJob.picture.height);
 
     XCTAssertEqual(self.job.picture.displayWidth, self.modifiedJob.picture.displayWidth);
-    XCTAssertEqual(self.job.picture.parWidth, self.modifiedJob.picture.parWidth);
-    XCTAssertEqual(self.job.picture.parHeight, self.modifiedJob.picture.parHeight);
+    XCTAssertEqual(self.job.picture.parNum, self.modifiedJob.picture.parNum);
+    XCTAssertEqual(self.job.picture.parDen, self.modifiedJob.picture.parDen);
 
-    XCTAssertEqual(self.job.picture.autocrop, self.modifiedJob.picture.autocrop);
+    XCTAssertEqual(self.job.picture.cropMode, self.modifiedJob.picture.cropMode);
 
     XCTAssertEqual(self.job.picture.cropTop, self.modifiedJob.picture.cropTop);
     XCTAssertEqual(self.job.picture.cropBottom, self.modifiedJob.picture.cropBottom);

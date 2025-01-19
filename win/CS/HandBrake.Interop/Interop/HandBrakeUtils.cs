@@ -14,7 +14,6 @@ namespace HandBrake.Interop.Interop
     using System.Runtime.ExceptionServices;
     using System.Runtime.InteropServices;
     using System.Text.Json;
-    using System.Xml;
 
     using HandBrake.Interop.Interop.HbLib;
     using HandBrake.Interop.Interop.Interfaces.EventArgs;
@@ -42,7 +41,9 @@ namespace HandBrake.Interop.Interop
         /// </summary>
         private static bool globalInitialized;
 
-        private static bool initSuccess = false;
+        /// <summary>
+        /// True if we initialized without hardware support.
+        /// </summary>
         private static bool initNoHardware = false;
 
         /// <summary>
@@ -65,6 +66,7 @@ namespace HandBrake.Interop.Interop
         {
             if (!globalInitialized)
             {
+                bool initSuccess;
                 try
                 {
                     if (initNoHardwareMode)
@@ -72,7 +74,7 @@ namespace HandBrake.Interop.Interop
                         initNoHardware = true;
                         if (HBFunctions.hb_global_init_no_hardware() == -1)
                         {
-                            throw new InvalidOperationException("HB global init failed.");
+                            throw new InvalidOperationException("HB global init failed. (-1)");
                         }
 
                         initSuccess = true;
@@ -92,8 +94,10 @@ namespace HandBrake.Interop.Interop
                 {
                     if (HBFunctions.hb_global_init_no_hardware() == -1)
                     {
-                        throw new InvalidOperationException("HB global init failed.");
+                        throw new InvalidOperationException("HB global init failed. (-2)");
                     }
+
+                    initNoHardware = true;
                 }
 
                 globalInitialized = true;
@@ -346,17 +350,24 @@ namespace HandBrake.Interop.Interop
             ErrorLogged?.Invoke(null, new MessageLoggedEventArgs(message));
         }
 
+        /// <summary>
+        /// Returns true if we have successfully run global initialization.
+        /// </summary>
+        /// <returns>True if we have successfully run global initialization.</returns>
         public static bool IsInitialised()
         {
-            return initSuccess;
+            return globalInitialized;
         }
 
+        /// <summary>
+        /// Returns true if we initialized without hardware support.
+        /// </summary>
+        /// <returns>True if we initialized without hardware support.</returns>
         public static bool IsInitNoHardware()
         {
             return initNoHardware;
         }
 
-        [HandleProcessCorruptedStateExceptions]
         private static bool TryInit()
         {
             try

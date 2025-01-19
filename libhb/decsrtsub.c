@@ -1,6 +1,6 @@
 /* decsrtsub.c
 
-   Copyright (c) 2003-2021 HandBrake Team
+   Copyright (c) 2003-2024 HandBrake Team
    This file is part of the HandBrake source code
    Homepage: <http://handbrake.fr/>.
    It may be used under the terms of the GNU General Public License v2.
@@ -12,9 +12,11 @@
 #include <string.h>
 #include <iconv.h>
 #include <errno.h>
+#include "libavutil/avutil.h"
 #include "handbrake/handbrake.h"
 #include "handbrake/colormap.h"
 #include "handbrake/decavsub.h"
+#include "handbrake/extradata.h"
 
 struct start_and_end {
     unsigned long start, end;
@@ -55,7 +57,7 @@ struct hb_work_private_s
     unsigned long last_entry_number;
     unsigned long current_state;
     srt_entry_t current_entry;
-    iconv_t *iconv_context;
+    iconv_t iconv_context;
     hb_subtitle_t *subtitle;
     uint64_t start_time;              // In HB time
     uint64_t stop_time;               // In HB time
@@ -68,27 +70,27 @@ read_time_from_string( const char* timeString, struct start_and_end *result )
 {
     // for ex. 00:00:15,248 --> 00:00:16,545
 
-    long houres1, minutes1, seconds1, milliseconds1,
-         houres2, minutes2, seconds2, milliseconds2;
+    long hours1, minutes1, seconds1, milliseconds1,
+         hours2, minutes2, seconds2, milliseconds2;
     int scanned;
 
     scanned = sscanf(timeString, "%ld:%ld:%ld,%ld --> %ld:%ld:%ld,%ld\n",
-                    &houres1, &minutes1, &seconds1, &milliseconds1,
-                    &houres2, &minutes2, &seconds2, &milliseconds2);
+                    &hours1, &minutes1, &seconds1, &milliseconds1,
+                    &hours2, &minutes2, &seconds2, &milliseconds2);
     if (scanned != 8)
     {
         scanned = sscanf(timeString, "%ld:%ld:%ld.%ld --> %ld:%ld:%ld.%ld\n",
-                        &houres1, &minutes1, &seconds1, &milliseconds1,
-                        &houres2, &minutes2, &seconds2, &milliseconds2);
+                        &hours1, &minutes1, &seconds1, &milliseconds1,
+                        &hours2, &minutes2, &seconds2, &milliseconds2);
         if (scanned != 8)
         {
             return 0;
         }
     }
     result->start =
-        milliseconds1 + seconds1*1000 + minutes1*60*1000 + houres1*60*60*1000;
+        milliseconds1 + seconds1*1000 + minutes1*60*1000 + hours1*60*60*1000;
     result->end =
-        milliseconds2 + seconds2*1000 + minutes2*60*1000 + houres2*60*60*1000;
+        milliseconds2 + seconds2*1000 + minutes2*60*1000 + hours2*60*60*1000;
     return 1;
 }
 
@@ -565,9 +567,9 @@ static int decsrtInit( hb_work_object_t * w, hb_job_t * job )
     // Generate generic SSA Script Info.
     int height = job->title->geometry.height - job->crop[0] - job->crop[1];
     int width = job->title->geometry.width - job->crop[2] - job->crop[3];
-    hb_subtitle_add_ssa_header(w->subtitle, HB_FONT_SANS,
-                               .066 * job->title->geometry.height,
-                               width, height);
+    hb_set_ssa_extradata(&w->subtitle->extradata, HB_FONT_SANS,
+                         .066 * job->title->geometry.height,
+                         width, height);
     return 0;
 
 fail:

@@ -1,6 +1,6 @@
 /* handbrake.h
 
-   Copyright (c) 2003-2021 HandBrake Team
+   Copyright (c) 2003-2024 HandBrake Team
    This file is part of the HandBrake source code
    Homepage: <http://handbrake.fr/>.
    It may be used under the terms of the GNU General Public License v2.
@@ -19,7 +19,6 @@ extern "C" {
 #include "handbrake/compat.h"
 #include "handbrake/hb_json.h"
 #include "handbrake/preset.h"
-#include "handbrake/plist.h"
 #include "handbrake/param.h"
 #include "handbrake/colormap.h"
 
@@ -44,11 +43,13 @@ char *        hb_dvd_name( char * path );
 void          hb_dvd_set_dvdnav( int enable );
 
 /* hb_scan()
-   Scan the specified path. Can be a DVD device, a VIDEO_TS folder or
+   Scan the specified paths. Can be a DVD device, a VIDEO_TS folder or
    a VOB file. If title_index is 0, scan all titles. */
-void          hb_scan( hb_handle_t *, const char * path,
-                       int title_index, int preview_count,
-                       int store_previews, uint64_t min_duration );
+void          hb_scan( hb_handle_t * h, hb_list_t * paths, int title_index,
+                      int preview_count, int store_previews, uint64_t min_duration, uint64_t max_duration,
+                      int crop_threshold_frames, int crop_threshold_pixels,
+                      hb_list_t * exclude_extensions, int hw_decode, int keep_duplicate_titles);
+
 void          hb_scan_stop( hb_handle_t * );
 void          hb_force_rescan( hb_handle_t * );
 uint64_t      hb_first_duration( hb_handle_t * );
@@ -75,11 +76,16 @@ hb_buffer_t * hb_read_preview( hb_handle_t * h, hb_title_t *title,
                                int preview, int format );
 #endif // __LIBHB__
 
-hb_image_t  * hb_get_preview2(hb_handle_t * h, int title_idx, int picture,
-                              hb_geometry_settings_t *geo, int deinterlace);
-void          hb_set_anamorphic_size2(hb_geometry_t *src_geo,
-                                      hb_geometry_settings_t *geo,
-                                      hb_geometry_t *result);
+hb_image_t  * hb_get_preview(hb_handle_t * h, hb_dict_t * job_dict,
+                             int picture, int rescale, int pix_fmt);
+hb_image_t  * hb_get_preview3(hb_handle_t * h, int picture,
+                              hb_dict_t * job_dict);
+void          hb_rotate_geometry( hb_geometry_crop_t * geo,
+                                  hb_geometry_crop_t * result,
+                                  int angle, int hflip);
+void          hb_set_anamorphic_size2(hb_geometry_t          * src_geo,
+                                      hb_geometry_settings_t * geo,
+                                      hb_geometry_t          * result);
 void          hb_add_filter_dict( hb_job_t * job, hb_filter_object_t * filter,
                                   const hb_dict_t * settings_in );
 void          hb_add_filter( hb_job_t * job, hb_filter_object_t * filter,
@@ -115,6 +121,9 @@ typedef struct hb_interjob_s
     hb_rational_t vrate;     /* measured output vrate              */
 
     hb_subtitle_t *select_subtitle; /* foreign language scan subtitle */
+
+    void *context;
+    int   context_size;
 } hb_interjob_t;
 
 hb_interjob_t * hb_interjob_get( hb_handle_t * );

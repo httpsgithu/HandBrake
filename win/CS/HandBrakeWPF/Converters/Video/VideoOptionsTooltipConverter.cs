@@ -13,10 +13,9 @@ namespace HandBrakeWPF.Converters.Video
     using System.Globalization;
     using System.Windows.Data;
 
-    using HandBrakeWPF.Utilities;
+    using HandBrake.Interop.Interop;
 
     using EncodeTask = HandBrakeWPF.Services.Encode.Model.EncodeTask;
-    using VideoEncoder = HandBrakeWPF.Model.Video.VideoEncoder;
     using VideoEncodeRateType = HandBrakeWPF.Model.Video.VideoEncodeRateType;
 
     /// <summary>
@@ -47,23 +46,17 @@ namespace HandBrakeWPF.Converters.Video
             EncodeTask task = value as EncodeTask;
             if (task != null)
             {
-                string rfqp = task.VideoEncoder == VideoEncoder.X264 || task.VideoEncoder == VideoEncoder.X264_10 || task.VideoEncoder == VideoEncoder.X265 
-                    || task.VideoEncoder == VideoEncoder.X265_10 || task.VideoEncoder == VideoEncoder.X265_12 ? "RF" : "QP";
-
-                if (task.VideoEncoder == VideoEncoder.NvencH264 || task.VideoEncoder == VideoEncoder.NvencH265)
-                {
-                    rfqp = "CQ";
-                }
+                string rfqp = HandBrakeEncoderHelpers.GetVideoQualityRateControlName(task.VideoEncoder.ShortName);
 
                 string quality = task.VideoEncodeRateType == VideoEncodeRateType.ConstantQuality ? string.Format("{0} {1}", task.Quality, rfqp) : string.Format("{0} {1}", task.VideoBitrate, " kbps");
-                string twoPass = null;
+                string multiPass = null;
 
                 if (task.VideoEncodeRateType == VideoEncodeRateType.AverageBitrate)
                 {
-                    twoPass = task.TwoPass ? task.TurboFirstPass ? " (2-Pass with Turbo)" : " (2-Pass)" : string.Empty;
+                    multiPass = task.MultiPass ? task.TurboAnalysisPass ? " (Multi-Pass with Turbo)" : " (Multi-Pass)" : string.Empty;
                 }
 
-                return string.Format("{0} - {1}{2}", EnumHelper<VideoEncoder>.GetDisplay(task.VideoEncoder), quality, twoPass); 
+                return string.Format("{0} - {1}{2}", task.VideoEncoder.DisplayName, quality, multiPass); 
             }
 
             return "Unknown";

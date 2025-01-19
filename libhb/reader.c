@@ -1,11 +1,13 @@
 /* reader.c
 
-   Copyright (c) 2003-2021 HandBrake Team
+   Copyright (c) 2003-2024 HandBrake Team
    This file is part of the HandBrake source code
    Homepage: <http://handbrake.fr/>.
    It may be used under the terms of the GNU General Public License v2.
    For full terms see the file COPYING file or visit http://www.gnu.org/licenses/gpl-2.0.html
  */
+
+#include "libavutil/avutil.h"
 #include "handbrake/handbrake.h"
 
 static int  reader_init( hb_work_object_t * w, hb_job_t * job );
@@ -91,7 +93,7 @@ static int hb_reader_open( hb_work_private_t * r )
 {
     if ( r->title->type == HB_BD_TYPE )
     {
-        if ( !( r->bd = hb_bd_init( r->h, r->title->path ) ) )
+        if ( !( r->bd = hb_bd_init( r->h, r->title->path, r->job->keep_duplicate_titles ) ) )
             return 1;
         if(!hb_bd_start(r->bd, r->title))
         {
@@ -322,7 +324,7 @@ static int reader_init( hb_work_object_t * w, hb_job_t * job )
     // fifos that will be needed (+1 for null terminator)
     r->fifos = calloc(count + 1, sizeof(hb_fifo_t*));
 
-    // The stream needs to be open before starting the reader thead
+    // The stream needs to be open before starting the reader thread
     // to prevent a race with decoders that may share information
     // with the reader. Specifically avcodec needs this.
     if ( hb_reader_open( r ) )

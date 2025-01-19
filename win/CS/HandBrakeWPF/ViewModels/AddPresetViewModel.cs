@@ -14,7 +14,7 @@ namespace HandBrakeWPF.ViewModels
     using System.Linq;
     using System.Windows;
 
-    using Caliburn.Micro;
+    using HandBrake.App.Core.Utilities;
 
     using HandBrakeWPF.Model.Audio;
     using HandBrakeWPF.Model.Picture;
@@ -24,10 +24,7 @@ namespace HandBrakeWPF.ViewModels
     using HandBrakeWPF.Services.Presets;
     using HandBrakeWPF.Services.Presets.Interfaces;
     using HandBrakeWPF.Services.Presets.Model;
-    using HandBrakeWPF.Services.Scan.Model;
-    using HandBrakeWPF.Utilities;
     using HandBrakeWPF.ViewModels.Interfaces;
-    using HandBrakeWPF.Views;
 
     using EncodeTask = HandBrakeWPF.Services.Encode.Model.EncodeTask;
 
@@ -52,15 +49,17 @@ namespace HandBrakeWPF.ViewModels
             this.errorService = errorService;
             this.windowManager = windowManager;
             this.Title = Resources.AddPresetView_AddPreset;
-            this.Preset = new Preset { IsBuildIn = false, IsDefault = false, Category = PresetService.UserPresetCatgoryName };
+            this.Preset = new Preset { IsBuildIn = false, IsDefault = false, Category = PresetService.UserPresetCategoryName };
             this.PresetCategories = presetService.GetPresetCategories(true).Union(new List<PresetDisplayCategory> { addNewCategory }).ToList();
-            this.SelectedPresetCategory = this.PresetCategories.FirstOrDefault(n => n.Category == PresetService.UserPresetCatgoryName);
+            this.SelectedPresetCategory = this.PresetCategories.FirstOrDefault(n => n.Category == PresetService.UserPresetCategoryName);
 
             this.CustomHeight = 0;
             this.CustomWidth = 0;
         }
 
-        public Preset Preset { get; }
+        public Preset Preset { get; private set; }
+
+        public string PresetName => this.Preset.Name;
 
         public bool ShowCustomInputs
         {
@@ -89,7 +88,7 @@ namespace HandBrakeWPF.ViewModels
                 }
                 else
                 {
-                    this.PresetCategory = PresetService.UserPresetCatgoryName;
+                    this.PresetCategory = PresetService.UserPresetCategoryName;
                 }
             }
         }
@@ -115,7 +114,7 @@ namespace HandBrakeWPF.ViewModels
                 }
 
                 this.canAddNewPresetCategory = value;
-                this.NotifyOfPropertyChange();
+                this.NotifyOfPropertyChange(() => this.CanAddNewPresetCategory);
             }
         }
 
@@ -171,17 +170,22 @@ namespace HandBrakeWPF.ViewModels
 
         public int? CustomHeight { get; set; }
 
-        public void Setup(EncodeTask task, Title title, AudioBehaviours audioBehaviours, SubtitleBehaviours subtitleBehaviours)
+        public void Setup(EncodeTask task, AudioBehaviours audioBehaviours, SubtitleBehaviours subtitleBehaviours, string name)
         {
+            this.Preset = new Preset { IsBuildIn = false, IsDefault = false, Category = PresetService.UserPresetCategoryName };
             this.Preset.Task = new EncodeTask(task);
-            this.Preset.AudioTrackBehaviours = audioBehaviours.Clone();
-            this.Preset.SubtitleTrackBehaviours = subtitleBehaviours.Clone();
+            this.Preset.AudioTrackBehaviours = new AudioBehaviours(audioBehaviours); 
+            this.Preset.SubtitleTrackBehaviours = new SubtitleBehaviours(subtitleBehaviours);
+            if (!string.IsNullOrEmpty(name))
+            {
+                this.Preset.Name = name;
+            }
+           
+            this.audioDefaultsViewModel = new AudioDefaultsViewModel(this.windowManager);
+            this.audioDefaultsViewModel.Setup(audioBehaviours, task.OutputFormat);
 
-            this.audioDefaultsViewModel = new AudioDefaultsViewModel(this.Preset.Task);
-            this.audioDefaultsViewModel.Setup(this.Preset, this.Preset.Task);
-
-            this.subtitlesDefaultsViewModel = new SubtitlesDefaultsViewModel();
-            this.subtitlesDefaultsViewModel.SetupLanguages(subtitleBehaviours);
+            this.subtitlesDefaultsViewModel = new SubtitlesDefaultsViewModel(this.windowManager);
+            this.subtitlesDefaultsViewModel.SetupPreset(subtitleBehaviours);
 
             // Resolution Limits
             this.CustomWidth = task.MaxWidth;
@@ -247,35 +251,32 @@ namespace HandBrakeWPF.ViewModels
 
         public void EditAudioDefaults()
         {
-            this.audioDefaultsViewModel.ResetApplied();
-            this.windowManager.ShowDialog(this.audioDefaultsViewModel);
+            this.audioDefaultsViewModel.ShowWindow();
+
             if (audioDefaultsViewModel.IsApplied)
             {
-                this.Preset.AudioTrackBehaviours = this.audioDefaultsViewModel.AudioBehaviours.Clone();
+                this.Preset.AudioTrackBehaviours = new AudioBehaviours(this.audioDefaultsViewModel.AudioBehaviours);
             }
         }
 
         public void EditSubtitleDefaults()
         {
-            this.subtitlesDefaultsViewModel.ResetApplied();
-            SubtitlesDefaultsView view = new SubtitlesDefaultsView();
-            view.DataContext = this.subtitlesDefaultsViewModel;
-            view.ShowDialog();
+            this.subtitlesDefaultsViewModel.ShowWindow();
 
             if (subtitlesDefaultsViewModel.IsApplied)
             {
-                this.Preset.SubtitleTrackBehaviours = this.subtitlesDefaultsViewModel.SubtitleBehaviours.Clone();
+                this.Preset.SubtitleTrackBehaviours = new SubtitleBehaviours(this.subtitlesDefaultsViewModel.SubtitleBehaviours);
             }
         }
 
         public void Cancel()
         {
-            this.Close();
+            this.TryClose();
         }
 
-        public void Close()
+        private void Close()
         {
-            this.TryClose();
+            this.TryClose(true);
         }
 
         private void SetSelectedPictureSettingsResLimitMode()

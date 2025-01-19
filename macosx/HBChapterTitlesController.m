@@ -296,6 +296,7 @@
             {
                 [self presentError:error];
             }
+            [panel.URL stopAccessingSecurityScopedResource];
         }
     }];
 }
@@ -307,7 +308,7 @@
     NSSavePanel *panel = [NSSavePanel savePanel];
     panel.allowedFileTypes = @[@"csv"];
     panel.directoryURL = destinationDirectory;
-    panel.nameFieldStringValue = self.job.outputFileName.stringByDeletingPathExtension;
+    panel.nameFieldStringValue = self.job.destinationFileName.stringByDeletingPathExtension;
 
     [panel beginSheetModalForWindow:self.view.window completionHandler:^(NSInteger result)
     {
@@ -323,18 +324,18 @@
                 [csv appendFormat:@"%ld,",idx + 1];
                 idx++;
 
-                NSString *sanatizedTitle = [chapter.title stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""];
+                NSString *sanitizedTitle = [chapter.title stringByReplacingOccurrencesOfString:@"\"" withString:@"\"\""];
 
                 // If the title contains any commas or quotes, add quotes
-                if ([sanatizedTitle containsString:@","] || [sanatizedTitle containsString:@"\""])
+                if ([sanitizedTitle containsString:@","] || [sanitizedTitle containsString:@"\""])
                 {
                     [csv appendString:@"\""];
-                    [csv appendString:sanatizedTitle];
+                    [csv appendString:sanitizedTitle];
                     [csv appendString:@"\""];
                 }
                 else
                 {
-                    [csv appendString:sanatizedTitle];
+                    [csv appendString:sanitizedTitle];
                 }
                 [csv appendString:@"\n"];
             }
@@ -350,6 +351,8 @@
                 [panel close];
                 [[NSAlert alertWithError:saveError] runModal];
             }
+
+            [panel.URL stopAccessingSecurityScopedResource];
         }
     }];
 }

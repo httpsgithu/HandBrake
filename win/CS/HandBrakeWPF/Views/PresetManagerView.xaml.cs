@@ -9,11 +9,13 @@
 
 namespace HandBrakeWPF.Views
 {
+    using System;
     using System.Windows;
     using System.Windows.Controls;
     using System.Windows.Input;
     using System.Windows.Media;
 
+    using HandBrakeWPF.Helpers;
     using HandBrakeWPF.Services.Presets.Model;
     using HandBrakeWPF.ViewModels;
 
@@ -25,13 +27,19 @@ namespace HandBrakeWPF.Views
             this.Closing += this.PresetManagerView_Closing;
         }
 
+        protected override void OnSourceInitialized(EventArgs e)
+        {
+            base.OnSourceInitialized(e);
+            WindowHelper.SetDarkMode(this);
+        }
+
         private void PresetManagerView_Closing(object sender, System.ComponentModel.CancelEventArgs e)
         {
             this.Closing -= this.PresetManagerView_Closing;
             ((PresetManagerViewModel)this.DataContext).Close();
         }
 
-        private void PresetTreeviewItemCollasped(object sender, RoutedEventArgs e)
+        private void PresetTreeviewItemCollapsed(object sender, RoutedEventArgs e)
         {
             if (e.Source.GetType() == typeof(TreeViewItem))
             {
@@ -77,17 +85,14 @@ namespace HandBrakeWPF.Views
             return source as TreeViewItem;
         }
 
-        private void ToolBarLoaded(object sender, RoutedEventArgs e)
+        private void PresetName_OnPreviewKeyDown(object sender, KeyEventArgs e)
         {
-            ToolBar toolBar = sender as ToolBar;
-            if (toolBar != null)
-            {
-                var overflowGrid = toolBar.Template.FindName("OverflowGrid", toolBar) as FrameworkElement;
-                if (overflowGrid != null)
-                {
-                    overflowGrid.Visibility = Visibility.Collapsed;
-                }
-            }
+            ((PresetManagerViewModel)this.DataContext).SetPresetNameChanged();
+        }
+
+        private void Delete_Execute(object sender, ExecutedRoutedEventArgs e)
+        {
+            ((PresetManagerViewModel)this.DataContext).DeletePreset();
         }
     }
 }

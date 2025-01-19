@@ -63,22 +63,6 @@ NSString *HBPresetsChangedNotification = @"HBPresetsChangedNotification";
 
 #pragma mark - Load/Save
 
-/**
- *  Loads the old presets format (0.10 and earlier) plist
- *
- *  @param url the url of the plist
- */
-- (void)loadOldPresetsFromURL:(NSURL *)url
-{
-    NSError *error;
-    HBPreset *oldPresets = [[HBPreset alloc] initWithContentsOfURL:url error:&error];
-
-    for (HBPreset *preset in oldPresets.children)
-    {
-        [self.root insertObject:preset inChildrenAtIndex:self.root.countOfChildren];
-    }
-}
-
 - (BOOL)isNewer:(NSDictionary *)dict
 {
     int major, minor, micro;
@@ -114,7 +98,7 @@ NSString *HBPresetsChangedNotification = @"HBPresetsChangedNotification";
                             url.lastPathComponent.stringByDeletingPathExtension,
                             major, minor, micro];
 
-    return [url.URLByDeletingLastPathComponent URLByAppendingPathComponent:backupName];
+    return [url.URLByDeletingLastPathComponent URLByAppendingPathComponent:backupName isDirectory:NO];
 }
 
 typedef NS_ENUM(NSUInteger, HBPresetLoadingResult) {
@@ -150,7 +134,7 @@ typedef NS_ENUM(NSUInteger, HBPresetLoadingResult) {
                                                  versionMajor:[presetsDict[@"VersionMajor"] intValue]
                                                         minor:[presetsDict[@"VersionMinor"] intValue]
                                                         micro:[presetsDict[@"VersionMicro"] intValue]];
-                    [[NSFileManager defaultManager] copyItemAtURL:url toURL:backupURL error:NULL];
+                    [NSFileManager.defaultManager copyItemAtURL:url toURL:backupURL error:NULL];
                 }
 
                 // Update the presets to the current format.
@@ -218,15 +202,6 @@ typedef NS_ENUM(NSUInteger, HBPresetLoadingResult) {
         }
     }
 
-    // If there is no json presets file try to read the old plist
-    if (result == HBPresetLoadingResultFailed && presetsDict == nil)
-    {
-        // Try to load to load the old presets file
-        // if the new one is empty
-        [self loadOldPresetsFromURL:[url.URLByDeletingPathExtension URLByAppendingPathExtension:@"plist"]];
-        [self generateBuiltInPresets];
-    }
-
     // If the preset list contains no leaf,
     // add back the built in presets.
     __block BOOL leafFound = NO;
@@ -244,6 +219,11 @@ typedef NS_ENUM(NSUInteger, HBPresetLoadingResult) {
     }
 
     [self selectNewDefault];
+
+    if (result == HBPresetLoadingResultOKUpgraded)
+    {
+        [self savePresets];
+    }
 }
 
 - (BOOL)savePresetsToURL:(NSURL *)url
@@ -296,7 +276,7 @@ typedef NS_ENUM(NSUInteger, HBPresetLoadingResult) {
     __block HBPreset *normalPreset = nil;
     __block HBPreset *firstUserPreset = nil;
     __block HBPreset *firstBuiltInPreset = nil;
-    __block BOOL defaultAlreadySetted = NO;
+    __block BOOL defaultAlreadySet = NO;
 
     // Search for a possible new default preset
     // Try to use "Normal" or the first user preset.
@@ -320,7 +300,7 @@ typedef NS_ENUM(NSUInteger, HBPresetLoadingResult) {
         if ([obj isDefault])
         {
             self.defaultPreset = obj;
-            defaultAlreadySetted = YES;
+            defaultAlreadySet = YES;
         }
 
         if ([obj isDefault])
@@ -329,7 +309,7 @@ typedef NS_ENUM(NSUInteger, HBPresetLoadingResult) {
         }
     }];
 
-    if (defaultAlreadySetted)
+    if (defaultAlreadySet)
     {
         self.defaultPreset.isDefault = YES;
         return;

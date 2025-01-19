@@ -58,17 +58,26 @@
     return self;
 }
 
-- (void)windowDidLoad {
+- (void)windowDidLoad
+{
     [super windowDidLoad];
 
-    // Build the categories menu, and select the first
+    // Build the categories menu, and select the last used or the first
     [self buildCategoriesMenu];
-    if ([self.categories selectItemWithTag:2] == NO)
+    if ([self.categories indexOfItemWithTag:2] == -1)
     {
-        HBPreset *category = [[HBPreset alloc] initWithCategoryName:@"My Presets" builtIn:NO];
+        HBPreset *category = [[HBPreset alloc] initWithCategoryName:NSLocalizedString(@"My Presets", @"Add preset window -> My Presets") builtIn:NO];
         [self.manager addPreset:category];
         NSMenuItem *item = [self buildMenuItemWithCategory:category];
         [self.categories.menu insertItem:item atIndex:2];
+    }
+    NSString *lastUsedCategory = [NSUserDefaults.standardUserDefaults stringForKey:@"HBLastUsedCategory"];
+    if (lastUsedCategory)
+    {
+        [self.categories selectItemWithTitle:lastUsedCategory];
+    }
+    if (self.categories.selectedItem.tag != 2)
+    {
         [self.categories selectItemWithTag:2];
     }
     self.selectedCategory = self.categories.selectedItem.representedObject;
@@ -167,7 +176,7 @@
 - (IBAction)showAudioSettingsSheet:(id)sender
 {
     HBAudioDefaults *defaults = [[HBAudioDefaults alloc] init];
-    [defaults applyPreset:self.mutablePreset];
+    [defaults applyPreset:self.mutablePreset error:NULL];
 
     self.defaultsController = [[HBAudioDefaultsController alloc] initWithSettings:defaults];
 
@@ -183,7 +192,7 @@
 - (IBAction)showSubtitlesSettingsSheet:(id)sender
 {
     HBSubtitlesDefaults *defaults = [[HBSubtitlesDefaults alloc] init];
-    [defaults applyPreset:self.mutablePreset];
+    [defaults applyPreset:self.mutablePreset error:NULL];
 
     self.defaultsController = [[HBSubtitlesDefaultsController alloc] initWithSettings:defaults];
 
@@ -260,6 +269,7 @@
         self.preset = [newPreset copy];
         [self.selectedCategory insertObject:self.preset inChildrenAtIndex:self.selectedCategory.countOfChildren];
 
+        [NSUserDefaults.standardUserDefaults setObject:self.categories.selectedItem.title forKey:@"HBLastUsedCategory"];
         [self.window.sheetParent endSheet:self.window returnCode:NSModalResponseOK];
     }
 }
@@ -271,7 +281,7 @@
 
 - (IBAction)openUserGuide:(id)sender
 {
-    [[NSWorkspace sharedWorkspace] openURL:[HBUtilities.documentationURL URLByAppendingPathComponent:@"advanced/custom-presets.html"]];
+    [[NSWorkspace sharedWorkspace] openURL:[HBUtilities.documentationBaseURL URLByAppendingPathComponent:@"advanced/custom-presets.html"]];
 }
 
 @end

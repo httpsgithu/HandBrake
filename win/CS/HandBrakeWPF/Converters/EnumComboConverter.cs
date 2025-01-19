@@ -14,15 +14,13 @@ namespace HandBrakeWPF.Converters
     using System.Globalization;
     using System.Windows.Data;
 
-    using HandBrake.Interop.Interop.Interfaces.Model.Picture;
+    using HandBrake.App.Core.Utilities;
 
     using HandBrakeWPF.Model.Filters;
     using HandBrakeWPF.Model.Options;
     using HandBrakeWPF.Model.Video;
     using HandBrakeWPF.Services.Queue.Model;
-    using HandBrakeWPF.Utilities;
-    using OutputFormat = HandBrakeWPF.Services.Encode.Model.Models.OutputFormat;
-    using VideoEncoder = HandBrakeWPF.Model.Video.VideoEncoder;
+    using OutputFormat = Services.Encode.Model.Models.OutputFormat;
 
     /// <summary>
     /// Enum Combo Converter
@@ -37,11 +35,6 @@ namespace HandBrakeWPF.Converters
             }
 
             // Lists
-            if (value is IEnumerable<VideoEncoder>)
-            {
-                return EnumHelper<VideoEncoder>.GetEnumDisplayValues(typeof(VideoEncoder));
-            }
-
             if (value is IEnumerable<Detelecine>)
             {
                 return EnumHelper<Detelecine>.GetEnumDisplayValues(typeof(Detelecine));
@@ -93,11 +86,6 @@ namespace HandBrakeWPF.Converters
             }
 
             // Single Items
-            if (targetType == typeof(VideoEncoder) || value.GetType() == typeof(VideoEncoder))
-            {
-                return EnumHelper<VideoEncoder>.GetDisplay((VideoEncoder)value);
-            }
-
             if (targetType == typeof(Detelecine) || value.GetType() == typeof(Detelecine))
             {
                 return EnumHelper<Detelecine>.GetDisplay((Detelecine)value);
@@ -161,11 +149,6 @@ namespace HandBrakeWPF.Converters
             if (value is null)
             {
                 return null;
-            }
-
-            if (targetType == typeof(VideoEncoder) || value.GetType() == typeof(VideoEncoder))
-            {
-                return EnumHelper<VideoEncoder>.GetValue(value.ToString());
             }
 
             if (targetType == typeof(Denoise) || value.GetType() == typeof(Denoise))

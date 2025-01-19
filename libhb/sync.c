@@ -1,6 +1,6 @@
 /* sync.c
 
-   Copyright (c) 2003-2021 HandBrake Team
+   Copyright (c) 2003-2024 HandBrake Team
    This file is part of the HandBrake source code
    Homepage: <http://handbrake.fr/>.
    It may be used under the terms of the GNU General Public License v2.
@@ -11,6 +11,7 @@
 #include "handbrake/hbffmpeg.h"
 #include <stdio.h>
 #include "handbrake/audio_resample.h"
+#include "handbrake/hwaccel.h"
 
 #if HB_PROJECT_FEATURE_QSV
 #include "handbrake/qsv_common.h"
@@ -371,7 +372,7 @@ static hb_buffer_t * CreateBlackBuf( sync_stream_t * stream,
     {
         if (buf == NULL)
         {
-            buf = hb_frame_buffer_init(stream->common->job->pix_fmt,
+            buf = hb_frame_buffer_init(stream->common->job->input_pix_fmt,
                                    stream->common->job->title->geometry.width,
                                    stream->common->job->title->geometry.height);
             uint8_t *planes[4];
@@ -381,16 +382,55 @@ static hb_buffer_t * CreateBlackBuf( sync_stream_t * stream,
                 planes[i] = buf->plane[i].data;
                 linesizes[i] = buf->plane[i].stride;
             }
-            av_image_fill_black(planes, linesizes, stream->common->job->pix_fmt,
+            av_image_fill_black(planes, linesizes, stream->common->job->input_pix_fmt,
                                 stream->common->job->color_range, buf->f.width, buf->f.height);
             buf->f.color_prim = stream->common->job->title->color_prim;
             buf->f.color_transfer = stream->common->job->title->color_transfer;
             buf->f.color_matrix = stream->common->job->title->color_matrix;
             buf->f.color_range = stream->common->job->color_range;
+            buf->f.chroma_location = stream->common->job->chroma_location;
+
+            // Dolby Vision requires a RPU on every buffer, attach the first
+            // found during scan in the absence of something better
+            if (stream->common->job->title->initial_rpu)
+            {
+                hb_data_t *rpu = stream->common->job->title->initial_rpu;
+                AVBufferRef *ref = av_buffer_alloc(rpu->size);
+                memcpy(ref->data, rpu->bytes, rpu->size);
+
+                AVFrameSideData *sd_dst = NULL;
+                sd_dst = hb_buffer_new_side_data_from_buf(buf, stream->common->job->title->initial_rpu_type, ref);
+
+                if (!sd_dst)
+                {
+                    av_buffer_unref(&ref);
+                }
+            }
+
+#if HB_PROJECT_FEATURE_QSV
+            if (hb_qsv_get_memory_type(stream->common->job) == MFX_IOPATTERN_OUT_VIDEO_MEMORY)
+            {
+                buf = hb_qsv_copy_video_buffer_to_hw_video_buffer(stream->common->job, buf, hb_qsv_hw_filters_via_video_memory_are_enabled(stream->common->job));
+            }
+            else
+#endif
+            if (hb_hwaccel_is_full_hardware_pipeline_enabled(stream->common->job))
+            {
+                buf = hb_hwaccel_copy_video_buffer_to_hw_video_buffer(stream->common->job, &buf);
+            }
         }
         else
         {
-            buf = hb_buffer_dup(buf);
+#if HB_PROJECT_FEATURE_QSV
+            if (hb_qsv_get_memory_type(stream->common->job) == MFX_IOPATTERN_OUT_VIDEO_MEMORY)
+            {
+                buf = hb_qsv_buffer_dup(stream->common->job, buf, hb_qsv_hw_filters_via_video_memory_are_enabled(stream->common->job));
+            }
+            else
+#endif
+            {
+                buf = hb_buffer_dup(buf);
+            }
         }
         buf->s.start     = next_pts;
         next_pts        += frame_dur;
@@ -399,6 +439,7 @@ static hb_buffer_t * CreateBlackBuf( sync_stream_t * stream,
         duration        -= frame_dur;
         hb_buffer_list_append(&list, buf);
     }
+
     if (buf != NULL)
     {
         if (buf->s.stop < pts + dur)
@@ -465,8 +506,19 @@ static void alignStream( sync_common_t * common, sync_stream_t * stream,
                 buf = hb_list_item(other_stream->in_queue, 0);
                 if (buf->s.start < pts)
                 {
-                    hb_list_rem(other_stream->in_queue, buf);
-                    hb_buffer_close(&buf);
+                    if (other_stream->type == SYNC_TYPE_SUBTITLE &&
+                        buf->s.stop > pts)
+                    {
+                        // Subtitle ends after start time, keep sub and
+                        // adjust it's start time
+                        buf->s.start = pts;
+                        break;
+                    }
+                    else
+                    {
+                        hb_list_rem(other_stream->in_queue, buf);
+                        hb_buffer_close(&buf);
+                    }
                 }
                 else
                 {
@@ -1423,8 +1475,7 @@ static int OutputBuffer( sync_common_t * common )
                 hb_list_count(stream->in_queue) > min)
             {
                 buf = hb_list_item(stream->in_queue, 0);
-                if (buf->s.start < pts &&
-                    !(buf->s.flags & HB_BUF_FLAG_EOF))
+                if (buf->s.start < pts)
                 {
                     pts = buf->s.start;
                     out_stream = stream;
@@ -2322,7 +2373,7 @@ static int syncVideoInit( hb_work_object_t * w, hb_job_t * job)
     w->fifo_in                  = job->fifo_raw;
     w->fifo_out                 = job->fifo_sync;
 
-    if (job->pass_id == HB_PASS_ENCODE_2ND)
+    if (job->pass_id == HB_PASS_ENCODE_FINAL)
     {
         /* We already have an accurate frame count from pass 1 */
         hb_interjob_t * interjob = hb_interjob_get(job->h);
@@ -2483,7 +2534,7 @@ static void syncVideoClose( hb_work_object_t * w )
     }
 
     /* save data for second pass */
-    if( job->pass_id == HB_PASS_ENCODE_1ST )
+    if( job->pass_id == HB_PASS_ENCODE_ANALYSIS )
     {
         /* Preserve frame count for better accuracy in pass 2 */
         hb_interjob_t * interjob = hb_interjob_get( job->h );
@@ -2566,7 +2617,7 @@ static hb_buffer_t * merge_ssa(hb_buffer_t *a, hb_buffer_t *b)
         }
         // Text subtitles are SSA internally.  Use SSA newline code
         // and force style reset at beginning of new line.
-        len = sprintf((char*)buf->data, "%s\\N{\\r}%s", a->data, text);
+        len = snprintf((char*)buf->data, buf->size, "%s\\N{\\r}%s", a->data, text);
         if (len >= 0)
             buf->size = len + 1;
     }
@@ -2905,7 +2956,7 @@ static int syncVideoWork( hb_work_object_t * w, hb_buffer_t ** buf_in,
     // as currently for such support we cannot allocate >64 slices per texture
     // due to MSFT limitation, not impacting other cases
     if (pv->common->job->qsv.ctx && (pv->common->job->qsv.ctx->la_is_enabled == 1)
-        && hb_qsv_full_path_is_enabled(pv->common->job))
+        && pv->common->job->qsv.ctx->full_path_is_enabled)
     {
         pv->stream->max_len = SYNC_MIN_VIDEO_QUEUE_LEN;
         pv->common->job->qsv.ctx->la_is_enabled++;
@@ -3127,7 +3178,7 @@ static void UpdateState( sync_common_t * common, int frame_count )
 
     if (job->indepth_scan)
     {
-        // Progress for indept scan is handled by reader
+        // Progress for indepth scan is handled by reader
         // frame_count is used during indepth_scan
         // to find start & end points.
         return;
@@ -3161,14 +3212,23 @@ static void UpdateState( sync_common_t * common, int frame_count )
                             (common->st_dates[3]  - common->st_dates[0]);
     if (hb_get_date() > common->st_first + 4000)
     {
-        int eta;
         p.rate_avg = 1000.0 * common->st_counts[3] /
                      (common->st_dates[3] - common->st_first - job->st_paused);
-        eta = (common->est_frame_count - common->st_counts[3]) / p.rate_avg;
-        p.eta_seconds = eta;
-        p.hours       = eta / 3600;
-        p.minutes     = (eta % 3600) / 60;
-        p.seconds     = eta % 60;
+        if (common->est_frame_count >= common->st_counts[3])
+        {
+            int eta = (common->est_frame_count - common->st_counts[3]) / p.rate_avg;
+            p.eta_seconds = eta;
+            p.hours       = eta / 3600;
+            p.minutes     = (eta % 3600) / 60;
+            p.seconds     = eta % 60;
+        }
+        else
+        {
+            p.eta_seconds = 0;
+            p.hours    = -1;
+            p.minutes  = -1;
+            p.seconds  = -1;
+        }
     }
     else
     {
@@ -3192,7 +3252,7 @@ static void UpdateSearchState( sync_common_t * common, int64_t start,
 
     if (job->indepth_scan)
     {
-        // Progress for indept scan is handled by reader
+        // Progress for indepth scan is handled by reader
         // frame_count is used during indepth_scan
         // to find start & end points.
         return;

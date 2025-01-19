@@ -19,8 +19,7 @@ namespace HandBrakeWPF.Services.Logging
     using System.Linq;
     using System.Text;
 
-    using HandBrake.Worker.Logging.Models;
-
+    using HandBrakeWPF.Model.Logging;
     using HandBrakeWPF.Utilities;
 
     using ILog = Interfaces.ILog;
@@ -66,11 +65,17 @@ namespace HandBrakeWPF.Services.Logging
 
         public string FullLogPath { get; private set; }
 
-        public void LogMessage(string content)
+        public void LogMessage(string content, bool enableTimeCode = false)
         {
             if (!this.isLoggingEnabled)
             {
                 return;
+            }
+
+            if (enableTimeCode)
+            {
+                string time = DateTime.Now.ToString("HH:mm:ss", System.Globalization.DateTimeFormatInfo.InvariantInfo);
+                content = String.Format("[{0}] {1}", time, content);
             }
 
             LogMessage msg = new LogMessage(content, this.messageIndex);
@@ -96,7 +101,7 @@ namespace HandBrakeWPF.Services.Logging
             this.OnMessageLogged(msg); // Must be outside lock to be thread safe. 
         }
 
-        public void ConfigureLogging(string filename, string fullLogPath)
+        public void ConfigureLogging(string filename, string fullLogPath, bool includeGpuInfo)
         {
             this.isLoggingEnabled = true;
             this.FileName = filename;
@@ -109,7 +114,7 @@ namespace HandBrakeWPF.Services.Logging
 
             this.EnableLoggingToDisk(fullLogPath);
 
-            this.logHeader = GeneralUtilities.CreateLogHeader().ToString();
+            this.logHeader = GeneralUtilities.CreateLogHeader(includeGpuInfo).ToString();
             this.LogMessage(logHeader);
         }
 
@@ -144,7 +149,7 @@ namespace HandBrakeWPF.Services.Logging
             return log;
         }
 
-        public async void Reset()
+        public void Reset()
         {
             lock (this.lockObject)
             {
@@ -160,10 +165,8 @@ namespace HandBrakeWPF.Services.Logging
                     this.EnableLoggingToDisk(this.diskLogPath);
                 }
 
-                if (!string.IsNullOrEmpty(this.logHeader))
-                {
-                    this.SetupLogHeader(this.logHeader);
-                }
+                this.logHeader = GeneralUtilities.CreateLogHeader(true).ToString();
+                this.SetupLogHeader(this.logHeader);
 
                 this.OnLogReset();
             }
